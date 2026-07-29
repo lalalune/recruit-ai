@@ -27,7 +27,7 @@ const supportedTargets: BinaryTarget[] = [
   { target: "bun-darwin-arm64", filename: "recruit-ai-macos-arm64" },
   { target: "bun-darwin-x64", filename: "recruit-ai-macos-x64" },
   {
-    target: "bun-windows-x64-baseline",
+    target: "bun-windows-x64",
     filename: "recruit-ai-windows-x64.exe",
   },
   {
@@ -42,7 +42,7 @@ function currentTarget(): BinaryTarget {
       return candidate.target === `bun-darwin-${process.arch}`;
     }
     if (process.platform === "win32" && process.arch === "x64") {
-      return candidate.target === "bun-windows-x64-baseline";
+      return candidate.target === "bun-windows-x64";
     }
     if (process.platform === "linux" && process.arch === "x64") {
       return candidate.target === "bun-linux-x64-baseline";
@@ -74,11 +74,18 @@ function sha256(filePath: string) {
 
 async function compileBinary(binary: BinaryTarget, stagingDir: string) {
   const outfile = path.join(stagingDir, binary.filename);
+  const useInstalledWindowsRuntime =
+    process.platform === "win32" &&
+    process.arch === "x64" &&
+    binary.target === "bun-windows-x64";
   console.log(`Building ${binary.filename} (${binary.target})…`);
   const result = await Bun.build({
     entrypoints: [entrypoint],
     compile: {
-      target: binary.target,
+      // Compiling the native Windows target with the installed runtime avoids
+      // an unnecessary target-runtime download. Cross-compilation still pins
+      // the documented standard Windows x64 target above.
+      ...(useInstalledWindowsRuntime ? {} : { target: binary.target }),
       outfile,
       autoloadDotenv: true,
       autoloadBunfig: false,
