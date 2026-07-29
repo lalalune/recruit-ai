@@ -73,7 +73,12 @@ afterEach(() => {
     process.env.RECRUITAI_DATA_DIR = originalDataDir;
   }
   if (testDataDir.startsWith(path.join(tmpdir(), "recruit-ai-test-"))) {
-    rmSync(testDataDir, { recursive: true, force: true });
+    rmSync(testDataDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 8,
+      retryDelay: 50,
+    });
   }
 });
 

@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import {
+  closeSqliteDatabase,
   closeDatabase,
   getDatabase,
   newId,
@@ -46,6 +47,15 @@ interface BackupPayload {
 function backupsDir() {
   const value = path.join(getDataDir(), "backups");
   return ensurePrivateDirectory(value);
+}
+
+function removeFileWithRetries(filePath: string) {
+  rmSync(filePath, {
+    force: true,
+    recursive: true,
+    maxRetries: 8,
+    retryDelay: 50,
+  });
 }
 
 function safeBackupPath(fileName: string) {
@@ -212,9 +222,14 @@ function validateSqliteFile(filePath: string) {
       throw new Error("Backup database failed SQLite integrity validation.");
     }
   } finally {
-    candidate.close();
-    rmSync(`${filePath}-wal`, { force: true });
-    rmSync(`${filePath}-shm`, { force: true });
+    try {
+      candidate.exec("PRAGMA query_only = OFF");
+    } catch {
+      // Continue closing an invalid or already-failed candidate.
+    }
+    closeSqliteDatabase(candidate);
+    removeFileWithRetries(`${filePath}-wal`);
+    removeFileWithRetries(`${filePath}-shm`);
   }
 }
 
@@ -288,8 +303,8 @@ export function restoreFullBackup(backupText: string) {
   let databaseSwapped = false;
   let snapshotsSwapped = false;
   try {
-    if (existsSync(`${databasePath}-wal`)) rmSync(`${databasePath}-wal`);
-    if (existsSync(`${databasePath}-shm`)) rmSync(`${databasePath}-shm`);
+    removeFileWithRetries(`${databasePath}-wal`);
+    removeFileWithRetries(`${databasePath}-shm`);
     if (existsSync(databasePath)) renameSync(databasePath, rollbackPath);
     renameSync(tempPath, databasePath);
     if (process.platform !== "win32") chmodSync(databasePath, 0o600);

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, constants } from "bun:sqlite";
 import { chmodSync, existsSync } from "node:fs";
 import { getDatabasePath } from "./paths";
 
@@ -363,8 +363,24 @@ export function getDatabase() {
 }
 
 export function closeDatabase() {
-  singleton?.close();
+  if (!singleton) return;
+  const database = singleton;
   singleton = null;
+  closeSqliteDatabase(database);
+}
+
+export function closeSqliteDatabase(database: Database) {
+  try {
+    database.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, 0);
+  } catch {
+    // Some SQLite builds or in-memory databases do not expose this control.
+  }
+  try {
+    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  } catch {
+    // A read-only validation connection may not permit a checkpoint.
+  }
+  database.close();
 }
 
 export function resetDatabaseForTests(databasePath: string) {
