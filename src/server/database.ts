@@ -5,7 +5,6 @@ import { getDatabasePath } from "./paths";
 let singleton: Database | null = null;
 
 const schema = `
-PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 
@@ -249,6 +248,12 @@ export function getDatabase() {
   if (singleton) return singleton;
   const databasePath = getDatabasePath();
   singleton = new Database(databasePath, { create: true });
+  // Bun currently keeps WAL files locked after Database.close() on native
+  // Windows. The rollback journal avoids that runtime-specific lock and keeps
+  // backup restore/delete operations reliable for this single-owner app.
+  singleton.exec(
+    `PRAGMA journal_mode = ${process.platform === "win32" ? "DELETE" : "WAL"}`,
+  );
   singleton.exec(schema);
   const draftColumns = singleton
     .query("PRAGMA table_info('outreach_drafts')")

@@ -337,7 +337,7 @@ data/
   snapshots/
 ```
 
-SQLite uses WAL mode, foreign keys, a busy timeout, indexes for review/hiring queues, and FTS5 for company search. One local owner and a bounded number of background workers are the intended concurrency model.
+SQLite uses WAL mode on macOS/Linux and the rollback journal on native Windows, plus foreign keys, a busy timeout, indexes for review/hiring queues, and FTS5 for company search. The Windows choice avoids a Bun runtime WAL-handle issue that otherwise prevents safe in-process backup replacement; the single-owner concurrency model does not need WAL there. One local owner and a bounded number of background workers are the intended concurrency model.
 
 Core tables:
 
@@ -467,7 +467,7 @@ Accept when every source has an owner, mode, official reference, retained fields
 Deliver:
 
 - Bun/Hono/React app;
-- SQLite schema, migrations, WAL, FTS;
+- SQLite schema, migrations, platform-safe journaling, FTS;
 - loopback-only service;
 - local data paths, audit events, settings and secret abstraction;
 - checkpointed full backup/inspection/restore, compaction, demo cleanup, and recovery-before-delete;

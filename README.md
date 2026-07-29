@@ -42,7 +42,7 @@ The detailed policy for every source is in [docs/RESEARCH_PLAN.md](docs/RESEARCH
 - [Bun](https://bun.sh/) runtime, package manager, tests, SQLite driver, and executable compiler
 - React + Vite
 - Hono local API
-- SQLite in WAL mode with FTS5
+- SQLite with FTS5; WAL on macOS/Linux and the rollback journal on native Windows
 - Zod request validation
 - Radix behavior primitives, Lucide icons, and a compact custom component layer
 
@@ -115,7 +115,7 @@ Everything except the directory README and `.gitkeep` is ignored by Git. The SQL
 
 On macOS and Linux, RecruitAI enforces owner-only permissions on the data, snapshot, and backup directories (`0700`) and on SQLite/snapshot/backup files it creates (`0600`). Windows relies on the current user’s application-data ACLs.
 
-Use **Settings → Local data → Create backup** for a full-fidelity JSON backup containing a checkpointed SQLite database and current snapshot files. Restore first validates the format, version, required tables, safe snapshot paths, and SQLite integrity, then creates a pre-restore safety backup before atomically replacing both the database and snapshot set. **Download backup** copies the selected artifact outside the app data directory. Do not copy only `recruit-ai.sqlite` while the application is writing in WAL mode; stop the app first if performing a manual filesystem copy. Encrypt off-device backups and keep them outside a synced public repository.
+Use **Settings → Local data → Create backup** for a full-fidelity JSON backup containing a checkpointed SQLite database and current snapshot files. Restore first validates the format, version, required tables, safe snapshot paths, and SQLite integrity, then creates a pre-restore safety backup before atomically replacing both the database and snapshot set. **Download backup** copies the selected artifact outside the app data directory. Do not copy only `recruit-ai.sqlite` while the application is running; on macOS/Linux, current writes may still be in the WAL. Stop the app first if performing a manual filesystem copy. Encrypt off-device backups and keep them outside a synced public repository.
 
 CSV export includes stable IDs; company qualification and score components; roles/conflict/suppression indicators; selected contact, fallback, phone, and employment proof; verification/review/outreach state; notes; and evidence URLs. It is formula-safe but intentionally flattened rather than a full database backup. Exporting data does not make a contact eligible for outreach.
 

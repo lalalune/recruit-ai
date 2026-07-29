@@ -76,7 +76,7 @@ HTML snapshots and excerpts are untrusted. Never execute captured script, interp
 
 - Keep foreign keys enabled and use transactions for related writes.
 - Use parameterized statements.
-- Do not copy a live WAL database as if the main file were a complete backup.
+- Do not copy a live database as if the main file were necessarily complete; macOS/Linux writes may still be in the WAL.
 - Validate backup format and migration version before restore.
 - Create a pre-restore backup and resolve the exact data path before deletion.
 - Encrypt backups containing company/contact data.
