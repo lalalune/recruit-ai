@@ -743,7 +743,12 @@ function restorePaths(restoreId: string) {
 }
 
 function syncPath(filePath: string) {
-  const descriptor = openSync(filePath, "r");
+  // Windows FlushFileBuffers requires a writable file handle. The files
+  // passed here are app-owned database, journal, snapshot, and backup files.
+  const descriptor = openSync(
+    filePath,
+    process.platform === "win32" ? "r+" : "r",
+  );
   try {
     fsyncSync(descriptor);
   } finally {
