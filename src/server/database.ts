@@ -3,6 +3,38 @@ import { chmodSync, existsSync } from "node:fs";
 import { getDatabasePath } from "./paths";
 
 let singleton: Database | null = null;
+type FinalizableStatement = { finalize(): void };
+const trackedStatements = new WeakMap<Database, Set<FinalizableStatement>>();
+
+export function trackSqliteStatements(database: Database) {
+  if (trackedStatements.has(database)) return database;
+  const statements = new Set<FinalizableStatement>();
+  const originalQuery = database.query.bind(database) as (
+    sql: string,
+  ) => FinalizableStatement;
+  const originalPrepare = database.prepare.bind(database) as (
+    sql: string,
+    ...bindings: unknown[]
+  ) => FinalizableStatement;
+  Object.defineProperty(database, "query", {
+    configurable: true,
+    value: (sql: string) => {
+      const statement = originalQuery(sql);
+      statements.add(statement);
+      return statement;
+    },
+  });
+  Object.defineProperty(database, "prepare", {
+    configurable: true,
+    value: (sql: string, ...bindings: unknown[]) => {
+      const statement = originalPrepare(sql, ...bindings);
+      statements.add(statement);
+      return statement;
+    },
+  });
+  trackedStatements.set(database, statements);
+  return database;
+}
 
 const schema = `
 PRAGMA foreign_keys = ON;
@@ -247,7 +279,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS company_search USING fts5(
 export function getDatabase() {
   if (singleton) return singleton;
   const databasePath = getDatabasePath();
-  singleton = new Database(databasePath, { create: true });
+  singleton = trackSqliteStatements(
+    new Database(databasePath, { create: true }),
+  );
   // Bun currently keeps WAL files locked after Database.close() on native
   // Windows. The rollback journal avoids that runtime-specific lock and keeps
   // backup restore/delete operations reliable for this single-owner app.
@@ -375,6 +409,18 @@ export function closeDatabase() {
 }
 
 export function closeSqliteDatabase(database: Database) {
+  const statements = trackedStatements.get(database);
+  if (statements) {
+    for (const statement of statements) {
+      try {
+        statement.finalize();
+      } catch {
+        // Continue finalizing the remaining cached statements.
+      }
+    }
+    statements.clear();
+    trackedStatements.delete(database);
+  }
   try {
     database.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, 0);
   } catch {
@@ -385,7 +431,7 @@ export function closeSqliteDatabase(database: Database) {
   } catch {
     // A read-only validation connection may not permit a checkpoint.
   }
-  database.close();
+  database.close(true);
 }
 
 export function resetDatabaseForTests(databasePath: string) {

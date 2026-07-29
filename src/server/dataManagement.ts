@@ -17,6 +17,7 @@ import {
   getDatabase,
   newId,
   nowIso,
+  trackSqliteStatements,
 } from "./database";
 import {
   getDataDir,
@@ -203,7 +204,9 @@ function validateSqliteFile(filePath: string) {
   // header. SQLite may need to create transient sidecars before a read-only
   // query can start, so open the already-created temp file read/write, then
   // immediately put the connection in query-only/untrusted-schema mode.
-  const candidate = new Database(filePath, { readwrite: true, create: false });
+  const candidate = trackSqliteStatements(
+    new Database(filePath, { readwrite: true, create: false }),
+  );
   try {
     candidate.exec("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF;");
     const tables = candidate
