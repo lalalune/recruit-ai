@@ -1,0 +1,613 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-28T23:45:29Z",
+  "title": "Design System: RecruitAI",
+  "extensions": {
+    "colorMeta": {
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Desk Canvas",
+        "canonical": "oklch(0.975 0.008 275)",
+        "tonalRamp": [
+          "oklch(0.15 0.008 275)",
+          "oklch(0.27 0.008 275)",
+          "oklch(0.39 0.008 275)",
+          "oklch(0.51 0.008 275)",
+          "oklch(0.63 0.008 275)",
+          "oklch(0.75 0.008 275)",
+          "oklch(0.87 0.008 275)",
+          "oklch(0.95 0.008 275)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Record Surface",
+        "canonical": "oklch(0.995 0.003 275)",
+        "tonalRamp": [
+          "oklch(0.15 0.003 275)",
+          "oklch(0.27 0.003 275)",
+          "oklch(0.39 0.003 275)",
+          "oklch(0.51 0.003 275)",
+          "oklch(0.63 0.003 275)",
+          "oklch(0.75 0.003 275)",
+          "oklch(0.87 0.003 275)",
+          "oklch(0.95 0.003 275)"
+        ]
+      },
+      "surface-subtle": {
+        "role": "neutral",
+        "displayName": "Queue Wash",
+        "canonical": "oklch(0.958 0.009 275)",
+        "tonalRamp": [
+          "oklch(0.15 0.009 275)",
+          "oklch(0.27 0.009 275)",
+          "oklch(0.39 0.009 275)",
+          "oklch(0.51 0.009 275)",
+          "oklch(0.63 0.009 275)",
+          "oklch(0.75 0.009 275)",
+          "oklch(0.87 0.009 275)",
+          "oklch(0.95 0.009 275)"
+        ]
+      },
+      "surface-strong": {
+        "role": "neutral",
+        "displayName": "Pressed Surface",
+        "canonical": "oklch(0.925 0.014 275)",
+        "tonalRamp": [
+          "oklch(0.15 0.014 275)",
+          "oklch(0.27 0.014 275)",
+          "oklch(0.39 0.014 275)",
+          "oklch(0.51 0.014 275)",
+          "oklch(0.63 0.014 275)",
+          "oklch(0.75 0.014 275)",
+          "oklch(0.87 0.014 275)",
+          "oklch(0.95 0.014 275)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Graphite Ink",
+        "canonical": "oklch(0.235 0.025 274)",
+        "tonalRamp": [
+          "oklch(0.15 0.025 274)",
+          "oklch(0.27 0.025 274)",
+          "oklch(0.39 0.025 274)",
+          "oklch(0.51 0.025 274)",
+          "oklch(0.63 0.025 274)",
+          "oklch(0.75 0.025 274)",
+          "oklch(0.87 0.025 274)",
+          "oklch(0.95 0.025 274)"
+        ]
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "Muted Graphite",
+        "canonical": "oklch(0.475 0.025 274)",
+        "tonalRamp": [
+          "oklch(0.15 0.025 274)",
+          "oklch(0.27 0.025 274)",
+          "oklch(0.39 0.025 274)",
+          "oklch(0.51 0.025 274)",
+          "oklch(0.63 0.025 274)",
+          "oklch(0.75 0.025 274)",
+          "oklch(0.87 0.025 274)",
+          "oklch(0.95 0.025 274)"
+        ]
+      },
+      "ink-faint": {
+        "role": "neutral",
+        "displayName": "Faint Graphite",
+        "canonical": "oklch(0.61 0.022 274)",
+        "tonalRamp": [
+          "oklch(0.15 0.022 274)",
+          "oklch(0.27 0.022 274)",
+          "oklch(0.39 0.022 274)",
+          "oklch(0.51 0.022 274)",
+          "oklch(0.63 0.022 274)",
+          "oklch(0.75 0.022 274)",
+          "oklch(0.87 0.022 274)",
+          "oklch(0.95 0.022 274)"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(0.875 0.016 275)",
+        "tonalRamp": [
+          "oklch(0.15 0.016 275)",
+          "oklch(0.27 0.016 275)",
+          "oklch(0.39 0.016 275)",
+          "oklch(0.51 0.016 275)",
+          "oklch(0.63 0.016 275)",
+          "oklch(0.75 0.016 275)",
+          "oklch(0.87 0.016 275)",
+          "oklch(0.95 0.016 275)"
+        ]
+      },
+      "border-strong": {
+        "role": "neutral",
+        "displayName": "Strong Hairline",
+        "canonical": "oklch(0.77 0.025 275)",
+        "tonalRamp": [
+          "oklch(0.15 0.025 275)",
+          "oklch(0.27 0.025 275)",
+          "oklch(0.39 0.025 275)",
+          "oklch(0.51 0.025 275)",
+          "oklch(0.63 0.025 275)",
+          "oklch(0.75 0.025 275)",
+          "oklch(0.87 0.025 275)",
+          "oklch(0.95 0.025 275)"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Decisive Violet",
+        "canonical": "oklch(0.5 0.16 280)",
+        "tonalRamp": [
+          "oklch(0.15 0.16 280)",
+          "oklch(0.27 0.16 280)",
+          "oklch(0.39 0.16 280)",
+          "oklch(0.51 0.16 280)",
+          "oklch(0.63 0.16 280)",
+          "oklch(0.75 0.16 280)",
+          "oklch(0.87 0.16 280)",
+          "oklch(0.95 0.16 280)"
+        ]
+      },
+      "accent-hover": {
+        "role": "primary",
+        "displayName": "Pressed Violet",
+        "canonical": "oklch(0.44 0.17 280)",
+        "tonalRamp": [
+          "oklch(0.15 0.17 280)",
+          "oklch(0.27 0.17 280)",
+          "oklch(0.39 0.17 280)",
+          "oklch(0.51 0.17 280)",
+          "oklch(0.63 0.17 280)",
+          "oklch(0.75 0.17 280)",
+          "oklch(0.87 0.17 280)",
+          "oklch(0.95 0.17 280)"
+        ]
+      },
+      "accent-soft": {
+        "role": "primary",
+        "displayName": "Violet Wash",
+        "canonical": "oklch(0.945 0.035 280)",
+        "tonalRamp": [
+          "oklch(0.15 0.035 280)",
+          "oklch(0.27 0.035 280)",
+          "oklch(0.39 0.035 280)",
+          "oklch(0.51 0.035 280)",
+          "oklch(0.63 0.035 280)",
+          "oklch(0.75 0.035 280)",
+          "oklch(0.87 0.035 280)",
+          "oklch(0.95 0.035 280)"
+        ]
+      },
+      "accent-ink": {
+        "role": "primary",
+        "displayName": "Violet Ink",
+        "canonical": "oklch(0.39 0.13 280)",
+        "tonalRamp": [
+          "oklch(0.15 0.13 280)",
+          "oklch(0.27 0.13 280)",
+          "oklch(0.39 0.13 280)",
+          "oklch(0.51 0.13 280)",
+          "oklch(0.63 0.13 280)",
+          "oklch(0.75 0.13 280)",
+          "oklch(0.87 0.13 280)",
+          "oklch(0.95 0.13 280)"
+        ]
+      },
+      "on-accent": {
+        "role": "neutral",
+        "displayName": "On Accent",
+        "canonical": "oklch(1 0 0)",
+        "tonalRamp": [
+          "oklch(0.15 0 0)",
+          "oklch(0.27 0 0)",
+          "oklch(0.39 0 0)",
+          "oklch(0.51 0 0)",
+          "oklch(0.63 0 0)",
+          "oklch(0.75 0 0)",
+          "oklch(0.87 0 0)",
+          "oklch(0.95 0 0)"
+        ]
+      },
+      "success": {
+        "role": "success",
+        "displayName": "Evidence Green",
+        "canonical": "oklch(0.49 0.105 154)",
+        "tonalRamp": [
+          "oklch(0.15 0.105 154)",
+          "oklch(0.27 0.105 154)",
+          "oklch(0.39 0.105 154)",
+          "oklch(0.51 0.105 154)",
+          "oklch(0.63 0.105 154)",
+          "oklch(0.75 0.105 154)",
+          "oklch(0.87 0.105 154)",
+          "oklch(0.95 0.105 154)"
+        ]
+      },
+      "success-soft": {
+        "role": "success",
+        "displayName": "Evidence Green Wash",
+        "canonical": "oklch(0.95 0.035 154)",
+        "tonalRamp": [
+          "oklch(0.15 0.035 154)",
+          "oklch(0.27 0.035 154)",
+          "oklch(0.39 0.035 154)",
+          "oklch(0.51 0.035 154)",
+          "oklch(0.63 0.035 154)",
+          "oklch(0.75 0.035 154)",
+          "oklch(0.87 0.035 154)",
+          "oklch(0.95 0.035 154)"
+        ]
+      },
+      "warning": {
+        "role": "warning",
+        "displayName": "Review Amber",
+        "canonical": "oklch(0.58 0.12 68)",
+        "tonalRamp": [
+          "oklch(0.15 0.12 68)",
+          "oklch(0.27 0.12 68)",
+          "oklch(0.39 0.12 68)",
+          "oklch(0.51 0.12 68)",
+          "oklch(0.63 0.12 68)",
+          "oklch(0.75 0.12 68)",
+          "oklch(0.87 0.12 68)",
+          "oklch(0.95 0.12 68)"
+        ]
+      },
+      "warning-soft": {
+        "role": "warning",
+        "displayName": "Review Amber Wash",
+        "canonical": "oklch(0.96 0.045 78)",
+        "tonalRamp": [
+          "oklch(0.15 0.045 78)",
+          "oklch(0.27 0.045 78)",
+          "oklch(0.39 0.045 78)",
+          "oklch(0.51 0.045 78)",
+          "oklch(0.63 0.045 78)",
+          "oklch(0.75 0.045 78)",
+          "oklch(0.87 0.045 78)",
+          "oklch(0.95 0.045 78)"
+        ]
+      },
+      "danger": {
+        "role": "danger",
+        "displayName": "Conflict Red",
+        "canonical": "oklch(0.52 0.17 28)",
+        "tonalRamp": [
+          "oklch(0.15 0.17 28)",
+          "oklch(0.27 0.17 28)",
+          "oklch(0.39 0.17 28)",
+          "oklch(0.51 0.17 28)",
+          "oklch(0.63 0.17 28)",
+          "oklch(0.75 0.17 28)",
+          "oklch(0.87 0.17 28)",
+          "oklch(0.95 0.17 28)"
+        ]
+      },
+      "danger-soft": {
+        "role": "danger",
+        "displayName": "Conflict Red Wash",
+        "canonical": "oklch(0.955 0.035 28)",
+        "tonalRamp": [
+          "oklch(0.15 0.035 28)",
+          "oklch(0.27 0.035 28)",
+          "oklch(0.39 0.035 28)",
+          "oklch(0.51 0.035 28)",
+          "oklch(0.63 0.035 28)",
+          "oklch(0.75 0.035 28)",
+          "oklch(0.87 0.035 28)",
+          "oklch(0.95 0.035 28)"
+        ]
+      },
+      "info": {
+        "role": "info",
+        "displayName": "Source Blue",
+        "canonical": "oklch(0.5 0.12 245)",
+        "tonalRamp": [
+          "oklch(0.15 0.12 245)",
+          "oklch(0.27 0.12 245)",
+          "oklch(0.39 0.12 245)",
+          "oklch(0.51 0.12 245)",
+          "oklch(0.63 0.12 245)",
+          "oklch(0.75 0.12 245)",
+          "oklch(0.87 0.12 245)",
+          "oklch(0.95 0.12 245)"
+        ]
+      },
+      "info-soft": {
+        "role": "info",
+        "displayName": "Source Blue Wash",
+        "canonical": "oklch(0.95 0.032 245)",
+        "tonalRamp": [
+          "oklch(0.15 0.032 245)",
+          "oklch(0.27 0.032 245)",
+          "oklch(0.39 0.032 245)",
+          "oklch(0.51 0.032 245)",
+          "oklch(0.63 0.032 245)",
+          "oklch(0.75 0.032 245)",
+          "oklch(0.87 0.032 245)",
+          "oklch(0.95 0.032 245)"
+        ]
+      },
+      "focus": {
+        "role": "primary",
+        "displayName": "Focus Violet",
+        "canonical": "oklch(0.64 0.16 280)",
+        "tonalRamp": [
+          "oklch(0.15 0.16 280)",
+          "oklch(0.27 0.16 280)",
+          "oklch(0.39 0.16 280)",
+          "oklch(0.51 0.16 280)",
+          "oklch(0.63 0.16 280)",
+          "oklch(0.75 0.16 280)",
+          "oklch(0.87 0.16 280)",
+          "oklch(0.95 0.16 280)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Page Headline",
+        "purpose": "Names the current primary workspace without becoming a marketing hero."
+      },
+      "title": {
+        "displayName": "Local Title",
+        "purpose": "Dialog, record, and focused section titles."
+      },
+      "body": {
+        "displayName": "Reading Body",
+        "purpose": "Explanatory prose and longer evidence summaries."
+      },
+      "body-compact": {
+        "displayName": "Compact Body",
+        "purpose": "Dense queue, control, and record copy."
+      },
+      "label": {
+        "displayName": "Control Label",
+        "purpose": "Buttons, fields, navigation, and actionable row text."
+      },
+      "data-label": {
+        "displayName": "Data Label",
+        "purpose": "Table headings, metric axes, and compact fact names."
+      },
+      "mono": {
+        "displayName": "Technical Mono",
+        "purpose": "Local paths, identifiers, and code values only."
+      }
+    },
+    "shadows": [
+      {
+        "name": "structural-rest",
+        "value": "0 1px 2px oklch(0.23 0.03 275 / 0.08)",
+        "purpose": "Barely visible lift for top-level panels, selected navigation, and buttons."
+      },
+      {
+        "name": "overlay-lift",
+        "value": "0 12px 36px oklch(0.23 0.03 275 / 0.14)",
+        "purpose": "Dialogs only, against the overlay scrim and without a decorative border."
+      },
+      {
+        "name": "sticky-separation",
+        "value": "0 -7px 18px oklch(0.25 0.02 275 / 0.04)",
+        "purpose": "Separates the anchored review decision bar from scrolling evidence."
+      },
+      {
+        "name": "mobile-navigation-lift",
+        "value": "0 -4px 16px oklch(0.23 0.03 275 / 0.08)",
+        "purpose": "Separates the fixed mobile navigation from the active workspace."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "120ms ease",
+        "purpose": "Button, field, selection, and overlay state changes."
+      },
+      {
+        "name": "dialog-enter",
+        "value": "140ms ease-out",
+        "purpose": "Short fade-and-lift for focused dialogs."
+      },
+      {
+        "name": "loading-spin",
+        "value": "700ms linear infinite",
+        "purpose": "Continuous rotation for the compact loading indicator only."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "0.01ms",
+        "purpose": "Collapses animation and transition duration when reduced motion is requested."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "wide-workbench",
+        "value": "1180px"
+      },
+      {
+        "name": "compact-sidebar",
+        "value": "980px"
+      },
+      {
+        "name": "mobile-workspace",
+        "value": "760px"
+      },
+      {
+        "name": "narrow-mobile",
+        "value": "480px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single action that advances the current decision.",
+      "html": "<button class=\"ds-button-primary\">Enrich people</button>",
+      "css": ".ds-button-primary { display: inline-flex; min-height: 36px; padding: 7px 12px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--accent); border-radius: var(--radius-sm); color: white; background: var(--accent); box-shadow: var(--shadow-sm); font-size: 0.84rem; font-weight: 650; line-height: 1; cursor: pointer; transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease; } .ds-button-primary:hover:not(:disabled) { border-color: var(--accent-hover); background: var(--accent-hover); } .ds-button-primary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; } .ds-button-primary:active:not(:disabled) { transform: translateY(1px); } .ds-button-primary:disabled { color: var(--ink-faint); border-color: var(--border); background: var(--surface-subtle); box-shadow: none; cursor: not-allowed; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A safe, reversible action that remains visible without competing with the primary decision.",
+      "html": "<button class=\"ds-button-secondary\">Research website</button>",
+      "css": ".ds-button-secondary { display: inline-flex; min-height: 36px; padding: 7px 12px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--ink); background: var(--surface); box-shadow: var(--shadow-sm); font-size: 0.84rem; font-weight: 650; line-height: 1; cursor: pointer; transition: border-color 120ms ease, background-color 120ms ease; } .ds-button-secondary:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-subtle); } .ds-button-secondary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; } .ds-button-secondary:active:not(:disabled) { transform: translateY(1px); } .ds-button-secondary:disabled { color: var(--ink-faint); background: var(--surface-subtle); box-shadow: none; cursor: not-allowed; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "A low-emphasis utility for dismissal, pagination, or tertiary actions.",
+      "html": "<button class=\"ds-button-ghost\">Dismiss</button>",
+      "css": ".ds-button-ghost { display: inline-flex; min-height: 36px; padding: 7px 12px; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--ink-muted); background: transparent; font-size: 0.84rem; font-weight: 650; line-height: 1; cursor: pointer; transition: background-color 120ms ease, color 120ms ease; } .ds-button-ghost:hover:not(:disabled) { color: var(--ink); background: var(--surface-subtle); } .ds-button-ghost:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; } .ds-button-ghost:active:not(:disabled) { transform: translateY(1px); } .ds-button-ghost:disabled { color: var(--ink-faint); cursor: not-allowed; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "A destructive or explicitly negative outcome control.",
+      "html": "<button class=\"ds-button-danger\">Mark bounced</button>",
+      "css": ".ds-button-danger { display: inline-flex; min-height: 36px; padding: 7px 12px; align-items: center; justify-content: center; border: 1px solid oklch(0.85 0.07 28); border-radius: var(--radius-sm); color: var(--danger); background: var(--danger-soft); font-size: 0.84rem; font-weight: 650; line-height: 1; cursor: pointer; transition: border-color 120ms ease, background-color 120ms ease; } .ds-button-danger:hover:not(:disabled) { border-color: var(--danger); background: oklch(0.93 0.05 28); } .ds-button-danger:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; } .ds-button-danger:active:not(:disabled) { transform: translateY(1px); } .ds-button-danger:disabled { color: var(--ink-faint); border-color: var(--border); background: var(--surface-subtle); cursor: not-allowed; }"
+    },
+    {
+      "name": "Labeled Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "A persistent label, compact control, and constraint hint for research and settings forms.",
+      "html": "<label class=\"ds-field\"><span>Search companies</span><input class=\"ds-input\" type=\"search\" placeholder=\"Company or sector\"><small>Searches the current local review queue.</small></label>",
+      "css": ".ds-field { display: grid; gap: 6px; color: var(--ink-muted); font-size: 0.81rem; font-weight: 620; } .ds-input { width: 100%; height: 38px; padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--ink); background: var(--surface); box-shadow: inset 0 1px 1px oklch(0.2 0.02 275 / 0.025); font-size: 0.84rem; } .ds-input::placeholder { color: var(--ink-muted); } .ds-input:hover { border-color: oklch(0.68 0.035 275); } .ds-input:focus-visible { outline: 3px solid oklch(0.8 0.09 280 / 0.7); outline-offset: 0; border-color: var(--accent); } .ds-input:disabled { color: var(--ink-faint); border-color: var(--border); background: var(--surface-subtle); cursor: not-allowed; } .ds-field small { color: var(--ink-muted); font-size: 0.75rem; font-weight: 450; }"
+    },
+    {
+      "name": "Review Checkbox",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "A compact binary filter or explicit owner confirmation with a visible text label.",
+      "html": "<label class=\"ds-checkbox-field\"><input class=\"ds-checkbox\" type=\"checkbox\" checked><span>Hiring only</span></label>",
+      "css": ".ds-checkbox-field { display: inline-flex; min-height: 28px; align-items: center; gap: 8px; color: var(--ink-muted); font-size: 0.81rem; font-weight: 500; cursor: pointer; } .ds-checkbox { width: 18px; height: 18px; margin: 0; border-radius: 4px; accent-color: var(--accent); cursor: pointer; } .ds-checkbox-field:hover { color: var(--ink); } .ds-checkbox:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; } .ds-checkbox:disabled { cursor: not-allowed; opacity: 0.55; }"
+    },
+    {
+      "name": "Semantic Status Badge",
+      "kind": "chip",
+      "refersTo": "badge-success",
+      "description": "A plain-language state label paired with a semantic tonal treatment.",
+      "html": "<span class=\"ds-badge-success\"><svg aria-hidden=\"true\" viewBox=\"0 0 16 16\" width=\"12\" height=\"12\"><path d=\"M13.4 4.6 6.5 11.5 2.8 7.8\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>Verified</span>",
+      "css": ".ds-badge-success { display: inline-flex; min-height: 22px; padding: 3px 7px; align-items: center; justify-content: center; gap: 4px; border: 1px solid oklch(0.83 0.07 154); border-radius: 999px; color: oklch(0.38 0.1 154); background: var(--success-soft); font-size: 0.7rem; font-weight: 700; line-height: 1; white-space: nowrap; }"
+    },
+    {
+      "name": "Primary Navigation Item",
+      "kind": "nav",
+      "refersTo": "nav-active",
+      "description": "A familiar destination link with icon, text, and an explicit active state.",
+      "html": "<a class=\"ds-nav-item is-active\" href=\"#\"><svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" width=\"18\" height=\"18\"><circle cx=\"11\" cy=\"11\" r=\"7\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/><path d=\"m20 20-4-4\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"/></svg><span>Discover</span></a>",
+      "css": ".ds-nav-item { display: flex; min-height: 40px; padding: 9px 10px; align-items: center; gap: 10px; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--ink-muted); background: transparent; font-size: 0.83rem; font-weight: 610; text-decoration: none; transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; } .ds-nav-item:hover { color: var(--ink); background: oklch(0.985 0.006 275); } .ds-nav-item:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; } .ds-nav-item.is-active { color: var(--accent-ink); background: var(--surface); border-color: var(--border); box-shadow: var(--shadow-sm); }"
+    },
+    {
+      "name": "Record Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "A top-level working surface with a joined heading and body, not a nested card stack.",
+      "html": "<section class=\"ds-panel\"><header class=\"ds-panel-heading\"><div><h3>Start research</h3><p>Choose one route. Existing records are updated.</p></div></header><div class=\"ds-panel-body\">Research controls and evidence belong here.</div></section>",
+      "css": ".ds-panel { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); color: var(--ink); background: var(--surface); box-shadow: var(--shadow-sm); } .ds-panel-heading { display: flex; padding: 18px 20px 14px; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); } .ds-panel-heading h3 { margin: 0; font-size: 0.94rem; letter-spacing: -0.01em; } .ds-panel-heading p { margin: 2px 0 0; color: var(--ink-muted); font-size: 0.77rem; } .ds-panel-body { padding: 20px; color: var(--ink-muted); font-size: 0.84rem; }"
+    },
+    {
+      "name": "Review Queue Row",
+      "kind": "custom",
+      "refersTo": "panel",
+      "description": "The signature scan unit for company, hiring signal, conflict state, and contact readiness.",
+      "html": "<a class=\"ds-queue-row is-active\" href=\"#\"><span class=\"ds-queue-top\"><strong>Acme Robotics</strong><span class=\"ds-queue-status\">Needs review</span></span><span class=\"ds-queue-meta\">San Francisco · 32 employees · Seed</span><span class=\"ds-queue-bottom\"><span>82 hiring signal</span><span>CEO · verified work email</span></span></a>",
+      "css": ".ds-queue-row { display: grid; min-height: 108px; padding: 13px 14px; gap: 5px; border: 1px solid transparent; border-bottom-color: var(--border); border-radius: var(--radius-sm); color: var(--ink); background: transparent; text-decoration: none; transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease; } .ds-queue-row:hover { background: var(--surface); border-color: var(--border-strong); } .ds-queue-row:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; } .ds-queue-row.is-active { background: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); } .ds-queue-top, .ds-queue-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; } .ds-queue-top strong { overflow: hidden; font-size: 0.84rem; text-overflow: ellipsis; white-space: nowrap; } .ds-queue-status { color: var(--accent-ink); font-size: 0.68rem; font-weight: 700; } .ds-queue-meta { color: var(--ink-faint); font-size: 0.7rem; } .ds-queue-bottom { margin-top: 5px; color: var(--ink-muted); font-size: 0.69rem; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Focused Research Desk",
+    "overview": "RecruitAI should feel like a well-organized research desk used for hours at a time: light, quiet, compact, and explicit about what needs attention. Cool violet-tinted neutrals separate the fixed navigation, working canvas, queues, and record surfaces without turning every region into a floating card. One restrained violet action color creates a clear path through discovery, review, and outreach.\n\nThe interface is a workbench, not a campaign. Lists stay dense enough to scan, then open into one reusable workspace where evidence, people, conflicts, and history can be inspected without losing queue position. Semantic colors communicate state alongside plain-language labels and icons. Motion is brief and functional; automation proposes, while the owner remains visibly in control.\n\nThe system explicitly rejects bloated enterprise CRM density, sales-engagement gamification, dark neon “hacker” styling, generic AI gradients, glassmorphism, spreadsheet replicas, novelty controls, and multi-step wizards. Familiar interaction patterns and progressive depth are the design advantage.",
+    "keyCharacteristics": [
+      "Compact queue-and-workspace layouts with one obvious next action.",
+      "Cool near-white tonal layers with violet reserved for action and current context.",
+      "Evidence states expressed through color, icon, label, freshness, and source.",
+      "One sans-serif family, tight hierarchy, and data-friendly labels.",
+      "Local-first and human-reviewed safeguards made visible in the interface.",
+      "Responsive structure that collapses navigation and swaps queue/workspace views without hiding capability."
+    ],
+    "rules": [
+      {
+        "name": "The One-Decision Rule",
+        "body": "Every surface must make the next useful decision visually obvious; secondary controls recede until they are needed.",
+        "section": "overview"
+      },
+      {
+        "name": "The Progressive-Depth Rule",
+        "body": "Keep queues compact and reveal full record context in the adjacent workspace or one focused dialog. Never expose every stored field at once.",
+        "section": "overview"
+      },
+      {
+        "name": "The Ten-Percent Violet Rule",
+        "body": "Decisive Violet occupies no more than roughly 10% of a screen. Its scarcity tells the owner where to act.",
+        "section": "colors"
+      },
+      {
+        "name": "The Evidence-Is-Not-Decoration Rule",
+        "body": "Green, amber, red, and blue appear only when a real record state exists. Always pair them with an icon, label, or both.",
+        "section": "colors"
+      },
+      {
+        "name": "The Readability Rule",
+        "body": "Use Graphite Ink or Muted Graphite for meaningful copy. Faint Graphite is prohibited for placeholders, instructions, and any text the owner must read to complete a task.",
+        "section": "colors"
+      },
+      {
+        "name": "The One-Voice Rule",
+        "body": "Use one sans-serif family across headings, controls, labels, and data. Never introduce a display font for product UI.",
+        "section": "typography"
+      },
+      {
+        "name": "The Quiet-Metadata Rule",
+        "body": "Metadata may be smaller, but it must remain readable. If a timestamp or source label carries a decision, promote it to Compact Body and Muted Graphite.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "A resting surface earns either a border or a shadow based on its structural role. Never combine a 1px border with a wide decorative shadow.",
+        "section": "elevation"
+      },
+      {
+        "name": "The State-Only Motion Rule",
+        "body": "Use 120–140ms transitions for hover, focus, selection, and dialog entry. Loading rotation is the sole continuous animation. Reduced-motion preferences collapse all movement to an immediate state change.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep one obvious primary action per decision region and use Decisive Violet only for action, current selection, or focus.",
+      "Do place source, freshness, conflict, and verification evidence beside the fact it qualifies.",
+      "Do use the queue-and-workspace pattern to preserve context while reviewing one company bundle at a time.",
+      "Do pair semantic color with a plain-language label, icon, or both.",
+      "Do keep focus rings visible at 3px and preserve keyboard order through navigation, queues, tabs, dialogs, and decision controls.",
+      "Do keep compact desktop controls at least 36px high and mobile navigation targets at least 44px high.",
+      "Do use full borders, background tints, and tonal layering to show selection and hierarchy.",
+      "Do retain empty, loading, error, disabled, and completed states for every workflow.",
+      "Do keep all data, credential, local-only, and send-safeguard messaging candid and close to the affected action."
+    ],
+    "donts": [
+      "Don't create bloated enterprise CRMs with deep configuration trees and duplicate concepts.",
+      "Don't turn the product into a sales-engagement dashboard that gamifies activity volume instead of showing evidence quality.",
+      "Don't use dark neon “hacker” styling, generic AI gradients, glassmorphism, or novelty interfaces.",
+      "Don't build spreadsheet replicas that expose every field at once and make review feel like data entry.",
+      "Don't introduce multi-step wizards for actions that can be completed in one clear screen.",
+      "Don't use a colored `border-left` or `border-right` greater than 1px as a selected-row, card, notice, or callout stripe; use a full outline or tonal fill.",
+      "Don't pair a 1px border with a shadow blur of 16px or more on the same surface.",
+      "Don't use gradient text, decorative grid backgrounds, repeating stripe backgrounds, or ornamental glass effects.",
+      "Don't apply green, amber, red, blue, or saturated violet to inactive states or for decoration.",
+      "Don't use Faint Graphite for placeholders, instructions, or required decision context.",
+      "Don't hide uncertainty behind a single score; show the underlying evidence, age, and conflicts.",
+      "Don't use decorative motion, orchestrated page-load sequences, bounce, or elastic easing.",
+      "Don't reinvent native form, dialog, tab, navigation, or scrolling affordances for personality."
+    ]
+  }
+}
