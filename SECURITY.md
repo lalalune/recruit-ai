@@ -4,7 +4,15 @@ RecruitAI stores API keys, OAuth tokens, public-page snapshots, professional con
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a vulnerability or include real credentials/data in a report. Use GitHub’s private vulnerability-reporting or Security Advisory flow for this repository. Include:
+Do not open a public issue for a vulnerability or include real credentials,
+personal information, provider payloads, or exploit details in a report.
+GitHub private vulnerability reporting through the repository’s
+[Security page](https://github.com/lalalune/recruit-ai/security/advisories/new)
+is the intended channel. Private vulnerability reporting, dependency alerts,
+and automated security-update pull requests are enabled for the public
+repository.
+
+Include:
 
 - affected version/commit and operating system;
 - reproduction steps using fictional data;
@@ -12,11 +20,13 @@ Do not open a public issue for a vulnerability or include real credentials/data 
 - whether secrets or personal information could be exposed; and
 - a suggested mitigation, if known.
 
-If private reporting is unavailable, open a public issue containing no exploit details or sensitive data and ask the maintainer for a private contact channel.
-
 ## Supported versions
 
-Until the first stable release, only the current default branch is supported. There is no security SLA. Critical fixes should be applied before continuing source runs or outreach.
+Until the first public release, only the current default branch is supported.
+GitHub draft releases and workflow artifacts are review material, not supported
+distributions. After publication, support is limited to the latest public
+release and the current default branch; older binaries should be upgraded
+before continuing source runs or outreach. There is no security SLA.
 
 ## Security model
 

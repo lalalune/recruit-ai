@@ -1,4 +1,7 @@
 import { getSecret, type SecretKey } from "./secrets";
+import { z } from "zod";
+import { conflict, upstreamFailure } from "./errors";
+import { readBoundedJson } from "./sources/http";
 
 export type TestableProvider =
   | "apollo"
@@ -9,7 +12,12 @@ export type TestableProvider =
 
 function requireSecret(key: SecretKey) {
   const value = getSecret(key);
-  if (!value) throw new Error("Save this provider credential before testing it.");
+  if (!value) {
+    throw conflict(
+      "Save this provider credential before testing it.",
+      "provider_not_configured",
+    );
+  }
   return value;
 }
 
@@ -25,7 +33,10 @@ async function checkedFetch(
       signal: AbortSignal.timeout(20_000),
     });
   } catch {
-    throw new Error(`${provider} could not be reached. Check the network and try again.`);
+    throw upstreamFailure(
+      `${provider} could not be reached. Check the network and try again.`,
+      "provider_unavailable",
+    );
   }
   if (!response.ok) {
     const reason =
@@ -36,7 +47,7 @@ async function checkedFetch(
           : response.status === 429
             ? "rate limit was reached"
             : `returned HTTP ${response.status}`;
-    throw new Error(`${provider} ${reason}.`);
+    throw upstreamFailure(`${provider} ${reason}.`, "provider_test_rejected");
   }
   return response;
 }
@@ -54,12 +65,20 @@ export async function testProviderConnection(provider: TestableProvider) {
         },
       },
     );
-    const payload = (await response.json()) as {
-      healthy?: boolean;
-      is_logged_in?: boolean;
-    };
+    const payload = await readBoundedJson(
+      response,
+      "Apollo",
+      z.object({
+        healthy: z.boolean().optional(),
+        is_logged_in: z.boolean().optional(),
+      }),
+      250_000,
+    );
     if (!payload.healthy || !payload.is_logged_in) {
-      throw new Error("Apollo responded, but the API key is not logged in.");
+      throw upstreamFailure(
+        "Apollo responded, but the API key is not logged in.",
+        "provider_test_rejected",
+      );
     }
     return { provider, ok: true, detail: "API key authenticated; no credits used." };
   }
@@ -75,12 +94,27 @@ export async function testProviderConnection(provider: TestableProvider) {
         },
       },
     );
-    const payload = (await response.json()) as {
-      data?: {
-        plan_name?: string;
-        requests?: { credits?: { available?: number } };
-      };
-    };
+    const payload = await readBoundedJson(
+      response,
+      "Hunter",
+      z.object({
+        data: z
+          .object({
+            plan_name: z.string().max(200).optional(),
+            requests: z
+              .object({
+                credits: z
+                  .object({
+                    available: z.number().min(0).max(1_000_000_000).optional(),
+                  })
+                  .optional(),
+              })
+              .optional(),
+          })
+          .optional(),
+      }),
+      250_000,
+    );
     return {
       provider,
       ok: true,
@@ -100,7 +134,15 @@ export async function testProviderConnection(provider: TestableProvider) {
       "ZeroBounce",
       `https://api.zerobounce.net/v2/getcredits?${query}`,
     );
-    const payload = (await response.json()) as { Credits?: number; credits?: number };
+    const payload = await readBoundedJson(
+      response,
+      "ZeroBounce",
+      z.object({
+        Credits: z.number().min(0).max(1_000_000_000).optional(),
+        credits: z.number().min(0).max(1_000_000_000).optional(),
+      }),
+      100_000,
+    );
     const credits = payload.Credits ?? payload.credits;
     return {
       provider,

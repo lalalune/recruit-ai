@@ -157,7 +157,7 @@ Decision: use Route C. The pipeline is:
 | Brave Search API | Automatic, licensed | Resolve missing official company domains | Query, up to five candidate URLs/snippets/scores, captured time | Fills domain gaps without scraping a search UI | Key required. LinkedIn, YC, paid directories, and ATS hosts are excluded. Candidate domains are review evidence; auto-apply occurs only when the owner opts in and the conservative score/lead thresholds pass. [Current API pricing](https://brave.com/search/api/) is per request and result-storage rights depend on the selected plan |
 | Apollo organization search | Automatic, licensed | Bay Area company discovery and size/job filters | Provider ID, company facts, provider evidence | Structured, scalable | Current official metering documents one credit per results page, up to 100 results/page; entitlements and fields remain plan-dependent. Organization search does not prove hiring or fit. See [organization search](https://docs.apollo.io/reference/organization-search) and [API pricing](https://docs.apollo.io/docs/api-pricing) |
 | Apollo people search/enrichment | Manual action, licensed | Rank a small candidate set and enrich only the current primary | Name, title, company, public profile URL; work email when returned for the primary | Faster people coverage without paying for every alternate | People Search itself currently uses no credits but requires a master API key and does not return email/phone. RecruitAI retains up to three ranked names/titles, enriches only the first/current primary, explicitly requests no personal email and no phone, and marks any returned work email `unverified`. Enrichment is currently documented as 1–9 credits/person depending on returned data. See [people search](https://docs.apollo.io/reference/people-api-search), [enrichment](https://docs.apollo.io/reference/people-enrichment), and [API pricing](https://docs.apollo.io/docs/api-pricing) |
-| Hunter Email Finder | Manual action, licensed | Find an address for one selected person/domain | Address, provider score/status, sources, timestamp | Domain/person-specific, cost controlled | A found address is not automatically deliverable. All-in-one plans currently document one Finder credit when an email is found; Data Platform/API plans can use a different pool. Confirm the purchased product in [official API docs](https://hunter.io/api-documentation) and [credit documentation](https://help.hunter.io/en/articles/10760432-how-do-credits-work) |
+| Hunter Email Finder | Manual action, licensed | Find an address for one selected person/domain | Address, provider score/status, sources, timestamp | Domain/person-specific, cost controlled | A found address is kept unverified until a fresh dedicated verifier request confirms the exact current address. All-in-one plans currently document one Finder credit when an email is found; Data Platform/API plans can use a different pool. Confirm the purchased product in [official API docs](https://hunter.io/api-documentation) and [credit documentation](https://help.hunter.io/en/articles/1911617-how-do-credits-work-in-hunter) |
 | Hunter Email Verifier | Manual action, licensed | Pre-confirm address deliverability category | Status, score, verification timestamp, provider evidence | Clear valid/invalid/accept-all/unknown outcomes | All-in-one plans currently document one-half credit for a completed verification, while API-oriented plans can meter a separate verification pool. Repeated/unknown-request charging also varies by product. `accept_all` and `unknown` remain review-only; reverify before send |
 | ZeroBounce | Manual optional action, licensed | Optional second verifier for ambiguous addresses | Only verification result and timestamp | Independent verifier; public bulk pricing | Key required and inactive until selected. Current pay-as-you-go examples publish 10,000 checks at $0.0129 each, a 2,000-credit/$39 minimum, no charge for `unknown`, and non-expiring credits; re-check [current pricing](https://www.zerobounce.net/email-validation-pricing.html) before purchase |
 | Y Combinator company/jobs pages | Manual | Research YC affiliation, company page, and jobs | Manually confirmed URL and note | Useful Bay Area startup directory | No automated directory scraping. Open [Bay Area hiring companies](https://www.ycombinator.com/companies/location/san-francisco-bay-area/hiring) or [YC Jobs](https://www.ycombinator.com/jobs) manually and respect [YC terms](https://www.ycombinator.com/legal/) |
@@ -254,7 +254,7 @@ Instead:
 
 Provider prices and included credits change; confirm the checkout page before a run. Taxes, overages, search APIs, proxy services, and developer time are excluded.
 
-Hunter’s [pricing](https://hunter.io/pricing) and [credit rules](https://help.hunter.io/en/articles/10760432-how-do-credits-work) are product-dependent. Its all-in-one plans currently describe Finder as one credit when an email is found and Verifier as one-half credit when verification completes; repeated identical requests in a billing period and `unknown` results may not be charged. The Data Platform/API product can instead use separate Search and Verification pools and documents one verification credit per API verification. Therefore “15,000 credits for 10,000 find-and-verify attempts” is only an all-in-one planning case, not a universal quote. Inspect the actual account before launching the run.
+Hunter’s [pricing](https://hunter.io/pricing) and [credit rules](https://help.hunter.io/en/articles/1911617-how-do-credits-work-in-hunter) are product-dependent. Its all-in-one plans currently describe Finder as one credit when an email is found and Verifier as one-half credit when verification completes; repeated identical requests in a billing period and `unknown` results may not be charged. The Data Platform/API product can instead use separate Search and Verification pools and documents one verification credit per API verification. Therefore “15,000 credits for 10,000 find-and-verify attempts” is only an all-in-one planning case, not a universal quote. Inspect the actual account before launching the run.
 
 ZeroBounce’s [published pay-as-you-go table](https://www.zerobounce.net/email-validation-pricing.html) currently shows 10,000 checks at about $0.0129 each, or roughly $129; its minimum purchase and subscriptions differ, `unknown` results are not charged, and purchased credits are described as non-expiring. The adapter is optional and it does not replace person-finding costs.
 
@@ -407,7 +407,7 @@ The current runner:
 
 Target refinements before relying on unattended 10,000-record runs are provider-specific token buckets, cursor/page checkpoints, batch-level restart, explicit maximum/dead-letter states, safe cancellation, and a coordinator pause. These controls are not implied by the current source-run history UI.
 
-SQLite is suitable for a single owner and tens of thousands of companies/contacts. The current `bun run benchmark:10k` check passed with 10,000 companies, contacts, and jobs: roughly 9.5 seconds to build the temporary fixture and 45 ms for the first 100-row queue query on the development machine. This is an engineering sanity check, not evidence of real-provider throughput or review usability. Move to a server database only if the product becomes multi-user or concurrent write volume materially exceeds the local model; PostgreSQL is intentionally out of scope.
+SQLite is suitable for a single owner and tens of thousands of companies/contacts. The current `bun run benchmark:10k` check passed with 10,000 companies, contacts, and jobs: roughly 10–12 seconds to build the temporary fixture and about 45 ms for the first 100-row queue query on the development machine across recent runs. This is an engineering sanity check, not evidence of real-provider throughput or review usability. Move to a server database only if the product becomes multi-user or concurrent write volume materially exceeds the local model; PostgreSQL is intentionally out of scope.
 
 ## 12. Review model
 
@@ -444,8 +444,8 @@ Review decisions are `approved`, `needs_research`, or `rejected`. Rejection keep
 | 6. Queue-first review | Implemented |
 | 7. Tailored drafts | Implemented; API supports concise/technical/founder variants, while the current one-click UI uses concise by default |
 | 8. Gated Gmail send | Implemented for explicit one-at-a-time sends, self-test, manual outcomes, and safety gates; no unattended queue or inbox sync |
-| 9. Packaging | Build/cross-compile scripts and platform data paths implemented; clean-machine validation, signing, notarization, checksums, and release provenance remain |
-| 10. Staged scale validation | Synthetic 10,000-company benchmark completed (about 9.5 seconds to build the fixture and 45 ms for the first 100-row queue query on the development machine); 100/1,000-company quality/cost/recovery pilots and production validation remain |
+| 9. Packaging | Version synchronization, cross-platform builds, native-runner isolated smoke tests, versioned archives, license/notices, manifests/checksums, platform data paths, and an unsigned draft-release workflow are implemented; signed/notarized artifacts, provenance/attestations, a default-data-path clean-install exercise, and a prior-version upgrade exercise remain |
+| 10. Staged scale validation | Synthetic 10,000-company benchmark completed (roughly 10–12 seconds to build the fixture and about 45 ms for the first 100-row queue query on the development machine across recent runs); 100/1,000-company quality/cost/recovery pilots and production validation remain |
 
 The deliver/accept lists below are the phase contract. An implemented phase can still have an unperformed real-provider, clean-machine, or production-outreach acceptance exercise.
 
@@ -568,12 +568,16 @@ Accept when a dedicated test account can authorize, pass the test-to-self gate, 
 Deliver:
 
 - current-platform Bun executable;
-- cross-compiled macOS arm64/x64, Windows x64, and Linux x64 artifacts;
+- native-built and smoke-tested macOS arm64/x64, Windows x64, and glibc Linux x64 artifacts;
 - platform app-data paths;
-- checksums and reproducible build instructions (**target refinement**);
+- versioned `.tar.gz`/`.zip` packages containing the executable, license, platform README, and generated third-party notices;
+- a release manifest and `SHA256SUMS` covering every archive;
+- a tag/version/default-branch gate that creates only an unsigned GitHub draft; and
 - signing/notarization plan (**target refinement**).
 
-Accept when each target launches on a clean machine, binds only to loopback, opens the UI, creates data outside the installation directory, and preserves data across an upgrade.
+The automated native smoke copies each executable to a temporary installation directory outside the checkout, strips provider/Gmail credentials from its child environment, binds it to loopback, exercises API security and mutation behavior, loads direct frontend routes, and proves data survives a restart in an isolated override directory.
+
+Accept when each target additionally launches on a separate clean machine, opens the UI in that platform’s system browser, creates data in the documented default per-user application-data directory, and preserves data across an upgrade from the prior public version. Signing, macOS notarization, Windows code signing, and release provenance/attestation remain publication gates rather than completed work.
 
 ### Phase 10 — staged scale validation
 
@@ -601,23 +605,20 @@ Do not scale a stage when its acceptance threshold is unknown. Set thresholds af
 
 ## 14. Test plan
 
-The current core suite exercises formula-safe CSV, settings validation, the Gmail self-test lock, full backup/inspect/restore/compact and destructive confirmations, phone provenance, active-run idempotency, CSV mapping, strong-versus-lead-only hiring readiness, outreach readiness and alternate sequencing, drafting, manual evidence/conflict resolution, record lifecycle/review reopening, and contained snapshot serving. The separate `benchmark:10k` script verifies the temporary 10,000-row dashboard and first-page queue path.
+The current deterministic unit/integration suites cover formula-safe CSV and owner-reviewed mapping; normalization/deduplication; settings validation; Gmail self-test, suppression recheck, ambiguous-delivery recovery, and idempotency gates; full backup/inspect/restore/compact, migration rejection, snapshot rewriting, and destructive confirmations; phone provenance; discovery-run idempotency; strong-versus-lead-only hiring readiness; outreach readiness and alternate sequencing; drafting; evidence/conflict resolution; record lifecycle/review reopening; inert snapshot serving; and private/local network target rejection.
 
-The complete release suite should additionally cover:
+Source-adapter fixtures now cover retryable 429/5xx responses, malformed and empty payloads, pagination, DataSF filtering, current Hacker News hiring-thread selection, Apollo organization/people behavior, Brave domain matching, public Greenhouse/Lever/Ashby ingestion, size-aware contact ranking, primary-only enrichment, Hunter and ZeroBounce status mapping, and suppression outcomes. Website tests cover JSON-LD identifiers, complete-versus-partial crawl job reconciliation, provenance mapping, and failed batch reporting.
 
-- normalization and adversarial dedupe examples;
-- source adapter fixtures, pagination, 429 retry, malformed payloads, and empty pages;
-- robots denial, redirects, DNS rebinding/private IP rejection, non-HTML and oversized pages;
-- JSON-LD job parsing and job stale/active transitions;
-- contact ranking by company size;
-- Hunter status mapping and claimed-address suppression;
-- evidence conflict creation and resolution;
-- review-gate invariants;
-- draft facts limited to stored evidence;
-- rolling send limits, time zones, crash recovery, and idempotency keys;
-- CSV import mapping, quoting, Unicode, and formula neutralization;
-- migration and backup/restore tests; and
-- accessibility checks plus keyboard-only end-to-end review.
+The isolated Chromium end-to-end suite exercises CSV import totals, browser navigation/history persistence, dialog secret/value clearing, keyboard tab behavior, ambiguous-send resolution, mobile queue return, automated WCAG A/AA scans, and route/viewport overflow checks. The native binary smoke covers the embedded frontend, loopback/API guards, persistence across restart, and execution from outside the source checkout. The separate `benchmark:10k` script verifies the temporary 10,000-row dashboard and first-page queue path.
+
+Remaining release coverage should add:
+
+- Firefox, WebKit/Safari, and installed system-browser parity;
+- real redirect chains, robots denial, DNS answer changes, timeouts, non-HTML responses, and oversized public pages in a controlled network fixture;
+- dedicated provider sandbox/acceptance runs without retaining live fixture data;
+- a clean-machine packaged-default-data-path exercise on every target;
+- a prior-public-version database upgrade and rollback exercise; and
+- signature, notarization, provenance/attestation, and installer checks once those release systems exist.
 
 Manual release checks should include one company from each ATS, a company with no ATS, a catch-all domain, a renamed company, a person who changed jobs, and a company with conflicting size/location evidence.
 

@@ -1,13 +1,26 @@
 node_modules/
 dist/
 dist-bin/
+.dist-bin-stage-*/
+dist-bin.previous-*/
 .env
 .env.*
 !.env.example
+.envrc
+.direnv/
 
 data/*
 !data/README.md
 !data/.gitkeep
+
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+recruitai-backup-*.json
+recruitai-backup-*.meta
+recruitai-contacts-*.csv
+contacts-export*.csv
 
 .DS_Store
 Thumbs.db

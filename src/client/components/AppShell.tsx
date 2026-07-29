@@ -39,6 +39,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               location === item.to || location.startsWith(`${item.to}/`);
             return (
               <Link
+                aria-label={item.label}
                 aria-current={isActive ? "page" : undefined}
                 className={`nav-link ${isActive ? "is-active" : ""}`}
                 key={item.to}

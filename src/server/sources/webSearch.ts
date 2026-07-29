@@ -6,14 +6,31 @@ import {
   patchCompany,
 } from "../repository";
 import { getSecret } from "../secrets";
-import { fetchWithTimeout, mapWithConcurrency } from "./http";
+import { conflict, notFound, upstreamFailure } from "../errors";
+import { z } from "zod";
+import {
+  fetchProviderResponse,
+  mapWithConcurrency,
+  readBoundedJson,
+} from "./http";
 
-interface BraveResult {
-  title?: string;
-  url?: string;
-  description?: string;
-  age?: string;
-}
+const BraveResultSchema = z.object({
+  title: z.string().max(1_000).optional(),
+  url: z.string().max(2_048).optional(),
+  description: z.string().max(5_000).optional(),
+  age: z.string().max(100).optional(),
+});
+type BraveResult = z.infer<typeof BraveResultSchema>;
+const BravePayloadSchema = z.object({
+  web: z
+    .object({
+      results: z.array(BraveResultSchema).max(50).optional(),
+    })
+    .optional(),
+  error: z.string().max(1_000).optional(),
+  message: z.string().max(1_000).optional(),
+  detail: z.string().max(1_000).optional(),
+});
 
 const excludedHosts = [
   "linkedin.com",
@@ -100,17 +117,28 @@ export async function resolveCompanyDomainWithBrave(
 ) {
   const key = getSecret("BRAVE_SEARCH_API_KEY");
   if (!key) {
-    throw new Error("Brave Search is not configured. Add an API key in Settings.");
+    throw conflict(
+      "Brave Search is not configured. Add an API key in Settings.",
+      "provider_not_configured",
+    );
   }
   const company = getCompany(companyId);
-  if (!company) throw new Error("Company not found.");
+  if (!company) throw notFound("Company not found.");
+  const expectedCompany = {
+    name: company.name,
+    domain: company.domain,
+    websiteUrl: company.websiteUrl,
+    location: company.location,
+    updatedAt: company.updatedAt,
+  };
   const query = new URLSearchParams({
     q: `"${company.name}" ${company.location || "San Francisco Bay Area"} official website`,
     count: "10",
     safesearch: "moderate",
     search_lang: "en",
   });
-  const response = await fetchWithTimeout(
+  const response = await fetchProviderResponse(
+    "Brave Search",
     `https://api.search.brave.com/res/v1/web/search?${query}`,
     {
       headers: {
@@ -120,9 +148,34 @@ export async function resolveCompanyDomainWithBrave(
     },
     30_000,
   );
-  const payload = (await response.json()) as {
-    web?: { results?: BraveResult[] };
-  };
+  const payload = await readBoundedJson(
+    response,
+    "Brave Search",
+    BravePayloadSchema,
+    1_500_000,
+  );
+  if (!response.ok || payload.error) {
+    throw upstreamFailure(
+      `Brave Search rejected the request${
+        response.ok ? "" : ` (HTTP ${response.status})`
+      }.`,
+      "brave_request_rejected",
+    );
+  }
+  const currentCompany = getCompany(companyId);
+  if (
+    !currentCompany ||
+    currentCompany.name !== expectedCompany.name ||
+    currentCompany.domain !== expectedCompany.domain ||
+    currentCompany.websiteUrl !== expectedCompany.websiteUrl ||
+    currentCompany.location !== expectedCompany.location ||
+    currentCompany.updatedAt !== expectedCompany.updatedAt
+  ) {
+    throw conflict(
+      "The company changed while Brave Search was running. The stale result was discarded.",
+      "stale_provider_result",
+    );
+  }
   const candidates = (payload.web?.results || [])
     .map((result) => scoreResult(company.name, result))
     .filter((result): result is NonNullable<typeof result> => Boolean(result))
@@ -174,7 +227,10 @@ export async function resolveMissingDomains(
   autoApplyHighConfidence: boolean,
 ) {
   if (!getSecret("BRAVE_SEARCH_API_KEY")) {
-    throw new Error("Brave Search is not configured. Add an API key in Settings.");
+    throw conflict(
+      "Brave Search is not configured. Add an API key in Settings.",
+      "provider_not_configured",
+    );
   }
   const ids = listCompaniesMissingDomain(limit);
   const results = await mapWithConcurrency(ids, 3, async (id) => {

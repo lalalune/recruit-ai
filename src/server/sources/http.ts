@@ -1,6 +1,7 @@
 import { request as requestHttp } from "node:http";
 import { request as requestHttps } from "node:https";
 import type { LookupFunction } from "node:net";
+import { upstreamFailure } from "../errors";
 
 const USER_AGENT =
   "RecruitAIResearch/0.1 (+local owner-operated research; contact via application settings)";
@@ -19,6 +20,32 @@ export async function fetchWithTimeout(
   init: RequestInit = {},
   timeoutMs = 20_000,
 ) {
+  return fetchRetried(url, init, timeoutMs, true);
+}
+
+export async function fetchProviderResponse(
+  provider: string,
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 20_000,
+) {
+  const safeProvider = provider.replace(/[^\w .-]/g, "").slice(0, 80) || "Provider";
+  try {
+    return await fetchRetried(url, init, timeoutMs, false);
+  } catch {
+    throw upstreamFailure(
+      `${safeProvider} could not be reached. Try again later.`,
+      "provider_unavailable",
+    );
+  }
+}
+
+async function fetchRetried(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  throwOnHttpError: boolean,
+) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const response = await fetch(url, {
       ...init,
@@ -28,13 +55,14 @@ export async function fetchWithTimeout(
     const retryable =
       response.status === 429 || (response.status >= 500 && response.status <= 599);
     if (response.ok || !retryable || attempt === 2) {
-      if (!response.ok) {
+      if (!response.ok && throwOnHttpError) {
         throw new Error(
           `${response.status} ${response.statusText} from ${new URL(url).hostname}`,
         );
       }
       return response;
     }
+    await response.body?.cancel().catch(() => undefined);
     const retryAfter = Number(response.headers.get("retry-after"));
     const delay = Number.isFinite(retryAfter) && retryAfter > 0
       ? Math.min(10_000, retryAfter * 1_000)
@@ -42,6 +70,92 @@ export async function fetchWithTimeout(
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
   throw new Error(`Request failed after retries to ${new URL(url).hostname}`);
+}
+
+type RuntimeSchema<T> = {
+  safeParse(
+    value: unknown,
+  ): { success: true; data: T } | { success: false; error?: unknown };
+};
+
+export async function readBoundedJson<T>(
+  response: Response,
+  provider: string,
+  schema: RuntimeSchema<T>,
+  maxBytes = 1_000_000,
+) {
+  const safeProvider = provider.replace(/[^\w .-]/g, "").slice(0, 80) || "Provider";
+  const boundedLimit = Math.min(10_000_000, Math.max(1_024, maxBytes));
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > boundedLimit) {
+    await response.body?.cancel().catch(() => undefined);
+    throw upstreamFailure(
+      `${safeProvider} returned more data than this request allows.`,
+      "upstream_payload_too_large",
+    );
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw upstreamFailure(
+      `${safeProvider} returned an empty or malformed response.`,
+      "upstream_payload_invalid",
+    );
+  }
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > boundedLimit) {
+        await reader.cancel().catch(() => undefined);
+        throw upstreamFailure(
+          `${safeProvider} returned more data than this request allows.`,
+          "upstream_payload_too_large",
+        );
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      ["upstream_payload_too_large", "upstream_payload_invalid"].includes(
+        String((error as { code?: unknown }).code || ""),
+      )
+    ) {
+      throw error;
+    }
+    throw upstreamFailure(
+      `${safeProvider} returned an unreadable response.`,
+      "upstream_payload_invalid",
+    );
+  }
+
+  let decoded: unknown;
+  try {
+    const bytes = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    decoded = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw upstreamFailure(
+      `${safeProvider} returned malformed JSON.`,
+      "upstream_payload_invalid",
+    );
+  }
+  const parsed = schema.safeParse(decoded);
+  if (!parsed.success) {
+    throw upstreamFailure(
+      `${safeProvider} returned data in an unexpected format.`,
+      "upstream_payload_invalid",
+    );
+  }
+  return parsed.data;
 }
 
 export async function fetchWithValidatedRedirects(

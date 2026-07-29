@@ -2,15 +2,18 @@ import { Hono, type Context } from "hono";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { APP_VERSION } from "../shared/version";
 import {
   CompanyPatchSchema,
   ContactPatchSchema,
   CsvImportSchema,
   DiscoveryRunSchema,
   DraftRequestSchema,
+  HttpUrlSchema,
   SettingsPatchSchema,
 } from "../shared/types";
 import { createContactsCsv } from "./csv";
+import { AppError, badRequest } from "./errors";
 import { testProviderConnection } from "./connections";
 import {
   clearDemoData,
@@ -49,6 +52,7 @@ import {
   listDrafts,
   listSuppressions,
   listSourceRuns,
+  getDraft,
   patchCompany,
   patchContact,
   patchDraft,
@@ -56,10 +60,12 @@ import {
   recordDraftOutcome,
   recordReview,
   resolveConflict,
+  resolveUnknownDraft,
   saveSetting,
 } from "./repository";
 import { getConnectionSummary, getSecret, saveSecrets } from "./secrets";
 import { getDataDir, getSnapshotsDir } from "./paths";
+import { withMutableOperation } from "./operationState";
 import { enrichCompanyWithApollo } from "./sources/apollo";
 import {
   findEmailWithHunter,
@@ -69,29 +75,45 @@ import {
 import { researchCompanyWebsite } from "./sources/website";
 import { resolveCompanyDomainWithBrave } from "./sources/webSearch";
 
-const ReviewSchema = z.object({
-  decision: z.enum(["approved", "rejected", "needs_research"]),
-  notes: z.string().optional(),
-});
+const ReviewSchema = z
+  .object({
+    decision: z.enum(["approved", "rejected", "needs_research"]),
+    notes: z.string().trim().max(2_000).optional(),
+  })
+  .refine(
+    (value) =>
+      value.decision === "approved" || Boolean(value.notes?.trim()),
+    {
+      message: "Record a reason for a rejection or further research.",
+      path: ["notes"],
+    },
+  )
+  .strict();
 
-const ManualEvidenceSchema = z.object({
-  entityType: z.enum(["company", "contact", "job"]),
-  entityId: z.string().uuid(),
-  fieldName: z.string().min(1),
-  value: z.string().optional().nullable(),
-  sourceUrl: z.string().url().optional().nullable(),
-  excerpt: z.string().optional().nullable(),
-  confirmed: z.boolean().default(false),
-});
+const ManualEvidenceSchema = z
+  .object({
+    entityType: z.enum(["company", "contact", "job"]),
+    entityId: z.string().uuid(),
+    fieldName: z.string().trim().min(1).max(200),
+    value: z.string().trim().max(5_000).optional().nullable(),
+    sourceUrl: HttpUrlSchema.optional().nullable(),
+    excerpt: z.string().trim().max(5_000).optional().nullable(),
+    confirmed: z.literal(true),
+  })
+  .refine((value) => Boolean(value.value || value.excerpt), {
+    message: "Add a value or source note for the confirmed evidence.",
+    path: ["value"],
+  })
+  .strict();
 
 const ManualJobSchema = z
   .object({
     title: z.string().trim().min(1).max(500),
     location: z.string().trim().max(500).optional().nullable(),
     department: z.string().trim().max(500).optional().nullable(),
-    url: z.string().url().optional().nullable(),
-    postedAt: z.string().optional().nullable(),
-    observedAt: z.string().min(1),
+    url: HttpUrlSchema.optional().nullable(),
+    postedAt: z.string().max(100).optional().nullable(),
+    observedAt: z.string().min(1).max(100),
     excerpt: z.string().max(5_000).optional().nullable(),
     confirmedLive: z.literal(true),
     noPublicUrl: z.boolean().default(false),
@@ -99,7 +121,8 @@ const ManualJobSchema = z
   .refine((value) => value.url || value.noPublicUrl, {
     message: "Add a public URL or confirm that no public URL is available.",
     path: ["url"],
-  });
+  })
+  .strict();
 
 const ExclusionSchema = z
   .object({
@@ -116,54 +139,135 @@ const ExclusionSchema = z
     ]),
     note: z.string().trim().max(2_000).optional(),
   })
+  .strict()
   .refine((value) => value.reason !== "other" || Boolean(value.note), {
     message: "A note is required for Other.",
     path: ["note"],
   });
 
-const ConflictResolutionSchema = z.object({
-  resolution: z.enum(["use_candidate", "keep_current", "research_further"]),
-  note: z.string().trim().min(1).max(2_000),
-});
+const ConflictResolutionSchema = z
+  .object({
+    resolution: z.enum(["use_candidate", "keep_current", "research_further"]),
+    note: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
 
-const SecretSchema = z.record(z.string(), z.string().nullable());
-const ProviderTestSchema = z.object({
-  provider: z.enum(["apollo", "hunter", "zerobounce", "socrata", "brave"]),
-});
-const BackupBodySchema = z.object({
-  backupText: z.string().min(1),
-});
+const SecretValueSchema = z.string().trim().max(10_000).nullable();
+const SecretSchema = z
+  .object({
+    APOLLO_API_KEY: SecretValueSchema.optional(),
+    HUNTER_API_KEY: SecretValueSchema.optional(),
+    ZEROBOUNCE_API_KEY: SecretValueSchema.optional(),
+    SOCRATA_APP_TOKEN: SecretValueSchema.optional(),
+    BRAVE_SEARCH_API_KEY: SecretValueSchema.optional(),
+    GOOGLE_CLIENT_ID: SecretValueSchema.optional(),
+    GOOGLE_CLIENT_SECRET: SecretValueSchema.optional(),
+  })
+  .strict();
+const ProviderTestSchema = z
+  .object({
+    provider: z.enum(["apollo", "hunter", "zerobounce", "socrata", "brave"]),
+  })
+  .strict();
+const BackupBodySchema = z
+  .object({
+    backupText: z.string().min(1).max(500 * 1024 * 1024),
+  })
+  .strict();
 const RestoreBodySchema = BackupBodySchema.extend({
   confirmation: z.literal("RESTORE LOCAL DATA"),
 });
-const ConfirmationSchema = z.object({
-  confirmation: z.string(),
-});
+const ConfirmationSchema = z
+  .object({
+    confirmation: z.string().max(100),
+  })
+  .strict();
 const ContactEditorSchema = ContactPatchSchema.omit({
   emailStatus: true,
   emailVerifiedAt: true,
 });
-const SuppressionSchema = z.object({
-  value: z.string().trim().min(1),
-  kind: z.enum(["email", "domain", "person", "company"]),
-  reason: z.string().trim().min(1),
-});
-const DraftPatchSchema = z.object({
-  subject: z.string().min(1).optional(),
-  body: z.string().min(1).optional(),
-  status: z.enum(["draft", "approved"]).optional(),
-  scheduledAt: z.string().optional().nullable(),
-});
-const DraftOutcomeSchema = z.object({
-  outcome: z.enum(["replied", "bounced", "no_response"]),
-  note: z.string().max(2_000).optional(),
-});
+const SuppressionSchema = z
+  .object({
+    value: z.string().trim().min(1).max(2_000),
+    kind: z.enum(["email", "domain", "person", "company"]),
+    reason: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+const DraftPatchSchema = z
+  .object({
+    subject: z.string().trim().min(1).max(998).optional(),
+    body: z.string().trim().min(1).max(100_000).optional(),
+    status: z.enum(["draft", "approved"]).optional(),
+    scheduledAt: z.string().datetime({ offset: true }).optional().nullable(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Include at least one draft field to update.",
+  });
+const DraftOutcomeSchema = z
+  .object({
+    outcome: z.enum(["replied", "bounced", "no_response"]),
+    note: z.string().trim().max(2_000).optional(),
+  })
+  .strict();
+const UnknownSendResolutionSchema = z
+  .object({
+    resolution: z.enum(["sent", "not_sent"]),
+    note: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+const DomainResearchSchema = z
+  .object({
+    autoApplyHighConfidence: z.boolean().optional(),
+  })
+  .strict();
+const DraftListQuerySchema = z
+  .object({
+    view: z.enum(["active", "approved", "all"]).optional(),
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+    offset: z.coerce.number().int().min(0).max(10_000_000).optional(),
+  })
+  .strict();
+
+const CompanyListQuerySchema = z
+  .object({
+    search: z.string().trim().max(500).optional(),
+    status: z
+      .enum([
+        "all",
+        "new",
+        "needs_research",
+        "ready_for_review",
+        "approved",
+        "rejected",
+        "archived",
+      ])
+      .optional(),
+    reviewed: z.enum(["true", "false"]).optional(),
+    priority: z.enum(["all", "high", "medium", "low"]).optional(),
+    hasOpenRoles: z.enum(["true", "false"]).optional(),
+    needs: z
+      .enum([
+        "all",
+        "fresh_jobs",
+        "missing_decision_maker",
+        "missing_email",
+        "email_verification",
+        "conflicts",
+        "ready_final",
+      ])
+      .optional(),
+    sort: z.enum(["hiring", "recent", "roles", "name", "oldest"]).optional(),
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+    offset: z.coerce.number().int().min(0).max(10_000_000).optional(),
+  })
+  .strict();
 
 async function readJson(c: Context) {
   try {
     return await c.req.json();
   } catch {
-    throw new Error("Request body must be valid JSON.");
+    throw badRequest("Request body must be valid JSON.", "invalid_json");
   }
 }
 
@@ -231,7 +335,7 @@ export function createApp() {
     c.json({
       data: {
         ok: true,
-        version: "0.1.0",
+        version: APP_VERSION,
         runtime: `Bun ${Bun.version}`,
       },
     }),
@@ -240,7 +344,14 @@ export function createApp() {
   app.get("/api/dashboard", (c) => c.json({ data: getDashboardSummary() }));
 
   app.get("/api/companies", (c) => {
-    const query = c.req.query();
+    const parsed = CompanyListQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json(
+        { error: "Invalid company query.", details: parsed.error.flatten() },
+        400,
+      );
+    }
+    const query = parsed.data;
     const result = listCompanies({
       search: query.search,
       status: query.status,
@@ -249,8 +360,8 @@ export function createApp() {
       hasOpenRoles: query.hasOpenRoles,
       needs: query.needs,
       sort: query.sort,
-      limit: query.limit ? Number(query.limit) : undefined,
-      offset: query.offset ? Number(query.offset) : undefined,
+      limit: query.limit,
+      offset: query.offset,
     });
     return c.json({ data: result.items, meta: { ...result, items: undefined } });
   });
@@ -296,7 +407,7 @@ export function createApp() {
   app.post("/api/companies/:id/contacts", async (c) => {
     const body = await readJson(c);
     const parsed = ContactEditorSchema.extend({
-      fullName: z.string().trim().min(1),
+      fullName: z.string().trim().min(1).max(500),
     }).safeParse(body);
     if (!parsed.success) {
       return c.json({ error: "Invalid contact.", details: parsed.error.flatten() }, 400);
@@ -467,28 +578,42 @@ export function createApp() {
   );
 
   app.post("/api/companies/:id/research/website", async (c) => {
-    const result = await researchCompanyWebsite(c.req.param("id"));
+    const result = await withMutableOperation("website research", () =>
+      researchCompanyWebsite(c.req.param("id")),
+    );
     return c.json({ data: result });
   });
 
   app.post("/api/companies/:id/research/apollo", async (c) => {
-    const result = await enrichCompanyWithApollo(c.req.param("id"));
+    const result = await withMutableOperation("Apollo research", () =>
+      enrichCompanyWithApollo(c.req.param("id")),
+    );
     return c.json({ data: result });
   });
 
   app.post("/api/companies/:id/research/domain", async (c) => {
-    const body = (await readJson(c)) as { autoApplyHighConfidence?: unknown };
-    const result = await resolveCompanyDomainWithBrave(
-      c.req.param("id"),
-      body.autoApplyHighConfidence === true,
+    const body = DomainResearchSchema.safeParse(await readJson(c));
+    if (!body.success) {
+      return c.json(
+        { error: "Invalid domain research request.", details: body.error.flatten() },
+        400,
+      );
+    }
+    const result = await withMutableOperation("domain research", () =>
+      resolveCompanyDomainWithBrave(
+        c.req.param("id"),
+        body.data.autoApplyHighConfidence === true,
+      ),
     );
     return c.json({ data: result });
   });
 
   app.post("/api/companies/:companyId/contacts/:contactId/find-email", async (c) => {
-    const result = await findEmailWithHunter(
-      c.req.param("companyId"),
-      c.req.param("contactId"),
+    const result = await withMutableOperation("email discovery", () =>
+      findEmailWithHunter(
+        c.req.param("companyId"),
+        c.req.param("contactId"),
+      ),
     );
     return c.json({ data: result });
   });
@@ -498,10 +623,11 @@ export function createApp() {
     if (!["hunter", "zerobounce"].includes(provider)) {
       return c.json({ error: "Unsupported verification provider." }, 400);
     }
-    const result =
+    const result = await withMutableOperation("email verification", () =>
       provider === "zerobounce"
-        ? await verifyEmailWithZeroBounce(c.req.param("id"))
-        : await verifyEmailWithHunter(c.req.param("id"));
+        ? verifyEmailWithZeroBounce(c.req.param("id"))
+        : verifyEmailWithHunter(c.req.param("id")),
+    );
     return c.json({ data: result });
   });
 
@@ -527,17 +653,27 @@ export function createApp() {
   );
 
   app.get("/api/outreach/drafts", (c) => {
-    const requestedView = c.req.query("view");
-    const view =
-      requestedView === "active" || requestedView === "approved"
-        ? requestedView
-        : "all";
-    const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 100));
-    const offset = Math.max(0, Number(c.req.query("offset")) || 0);
+    const parsed = DraftListQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) {
+      return c.json(
+        { error: "Invalid draft query.", details: parsed.error.flatten() },
+        400,
+      );
+    }
+    const view = parsed.data.view || "all";
+    const limit = parsed.data.limit || 100;
+    const offset = parsed.data.offset || 0;
     return c.json({
       data: listDrafts({ view, limit, offset }),
       meta: { total: countDrafts(view), limit, offset },
     });
+  });
+
+  app.get("/api/outreach/drafts/:id", (c) => {
+    const draft = getDraft(c.req.param("id"));
+    return draft
+      ? c.json({ data: draft })
+      : c.json({ error: "Draft not found." }, 404);
   });
 
   app.get("/api/suppressions", (c) => c.json({ data: listSuppressions() }));
@@ -567,10 +703,16 @@ export function createApp() {
     if (!parsed.success) {
       return c.json({ error: "Invalid draft request.", details: parsed.error.flatten() }, 400);
     }
-    const companyId = c.req.query("companyId");
-    if (!companyId) return c.json({ error: "companyId is required." }, 400);
+    const companyId = z.string().uuid().safeParse(c.req.query("companyId"));
+    if (!companyId.success) {
+      return c.json({ error: "A valid companyId is required." }, 400);
+    }
     return c.json({
-      data: generateDraft(companyId, parsed.data.contactId, parsed.data.tone),
+      data: generateDraft(
+        companyId.data,
+        parsed.data.contactId,
+        parsed.data.tone,
+      ),
     });
   });
 
@@ -599,7 +741,9 @@ export function createApp() {
       return c.redirect(gmailSettingsRedirect("error"));
     }
     try {
-      await completeGmailAuthorization(code, state);
+      await withMutableOperation("Gmail authorization", () =>
+        completeGmailAuthorization(code, state),
+      );
       return c.redirect(gmailSettingsRedirect("connected"));
     } catch (error) {
       console.error(error);
@@ -612,12 +756,34 @@ export function createApp() {
   );
 
   app.post("/api/gmail/test", async (c) =>
-    c.json({ data: await sendGmailTestMessage() }),
+    c.json({
+      data: await withMutableOperation("Gmail test", sendGmailTestMessage),
+    }),
   );
 
   app.post("/api/outreach/drafts/:id/send", async (c) =>
     c.json({ data: await sendApprovedDraft(c.req.param("id")) }),
   );
+
+  app.post("/api/outreach/drafts/:id/resolve-send", async (c) => {
+    const parsed = UnknownSendResolutionSchema.safeParse(await readJson(c));
+    if (!parsed.success) {
+      return c.json(
+        {
+          error: "Invalid delivery resolution.",
+          details: parsed.error.flatten(),
+        },
+        400,
+      );
+    }
+    return c.json({
+      data: resolveUnknownDraft(
+        c.req.param("id"),
+        parsed.data.resolution,
+        parsed.data.note,
+      ),
+    });
+  });
 
   app.post("/api/outreach/drafts/:id/outcome", async (c) => {
     const parsed = DraftOutcomeSchema.safeParse(await readJson(c));
@@ -779,7 +945,23 @@ export function createApp() {
         );
       }
     }
+    const selfTestInputs = [
+      "sender_name",
+      "organization_name",
+      "postal_address",
+      "opt_out_text",
+      "compliance_confirmed",
+    ] as const;
+    const invalidatesSelfTest = selfTestInputs.some(
+      (key) =>
+        parsed.data[key] !== undefined &&
+        parsed.data[key] !== current[key],
+    );
     for (const [key, value] of Object.entries(parsed.data)) saveSetting(key, value);
+    if (invalidatesSelfTest) {
+      saveSetting("gmail_test_passed_at", null);
+      saveSetting("gmail_sending_enabled", false);
+    }
     if (
       parsed.data.jobFreshnessDays !== undefined ||
       parsed.data.autoPrioritizeHiring !== undefined
@@ -794,9 +976,15 @@ export function createApp() {
     if (!parsed.success) {
       return c.json({ error: "Invalid secrets.", details: parsed.error.flatten() }, 400);
     }
-    return c.json({
-      data: saveSecrets(parsed.data as Parameters<typeof saveSecrets>[0]),
+    const googleCredentialsChanged = (
+      ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"] as const
+    ).some((key) => {
+      if (parsed.data[key] === undefined) return false;
+      return (parsed.data[key]?.trim() || null) !== getSecret(key);
     });
+    const data = saveSecrets(parsed.data);
+    if (googleCredentialsChanged) disconnectGmail();
+    return c.json({ data: googleCredentialsChanged ? getConnectionSummary() : data });
   });
 
   app.post("/api/settings/connections/test", async (c) => {
@@ -888,10 +1076,15 @@ export function createApp() {
   );
 
   app.onError((error, c) => {
-    console.error(error);
+    if (!(error instanceof AppError)) console.error(error);
+    const status = error instanceof AppError ? error.status : 500;
     const message =
-      error instanceof Error ? error.message : "An unexpected error occurred.";
-    return c.json({ error: message }, 500);
+      error instanceof AppError
+        ? error.message
+        : "An unexpected error occurred.";
+    const code =
+      error instanceof AppError ? error.code : "internal_error";
+    return c.json({ error: message, code }, status as 400 | 500);
   });
 
   app.notFound((c) => c.json({ error: "Not found." }, 404));

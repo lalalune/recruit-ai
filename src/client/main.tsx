@@ -17,10 +17,13 @@ const queryClient = new QueryClient({
   },
 });
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
-  </StrictMode>,
-);
+if (window.self === window.top) {
+  document.documentElement.dataset.recruitaiTopLevel = "true";
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+}

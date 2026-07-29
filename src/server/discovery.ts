@@ -1,12 +1,20 @@
 import Papa from "papaparse";
 import { createHash } from "node:crypto";
-import type { DiscoveryRunRequest } from "../shared/types";
-import { getDatabase } from "./database";
 import {
+  CompanyPatchSchema,
+  ContactPatchSchema,
+  type DiscoveryRunRequest,
+} from "../shared/types";
+import { getDatabase } from "./database";
+import { badRequest } from "./errors";
+import {
+  addAudit,
   addContact,
   addEvidence,
   createSourceRun,
   finishSourceRun,
+  getCompany,
+  listCompaniesMissingDomain,
   listCompaniesForWebsiteResearch,
   patchCompany,
   startSourceRun,
@@ -17,23 +25,92 @@ import { discoverApollo } from "./sources/apollo";
 import { discoverDataSf } from "./sources/datasf";
 import { discoverHackerNews } from "./sources/hackernews";
 import { ingestAshby, ingestGreenhouse, ingestLever } from "./sources/jobBoards";
-import { resolveMissingDomains } from "./sources/webSearch";
+import { resolveCompanyDomainWithBrave } from "./sources/webSearch";
 import { mapWithConcurrency } from "./sources/http";
 import { researchCompanyWebsite } from "./sources/website";
+import { reserveMutableOperation } from "./operationState";
+
+interface DiscoveryResult {
+  inserted: number;
+  updated: number;
+  skipped: number;
+  error?: string;
+}
+
+interface BatchFailure {
+  companyId: string;
+  companyLabel: string;
+  message: string;
+}
+
+function readableFailure(error: unknown) {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300) || "Unknown error";
+}
+
+function batchFailureMessage(
+  sourceLabel: string,
+  attempted: number,
+  failures: BatchFailure[],
+) {
+  if (!failures.length) return undefined;
+  const summary =
+    failures.length === attempted
+      ? `All ${attempted} ${sourceLabel} attempts failed.`
+      : `${failures.length} of ${attempted} ${sourceLabel} attempts failed.`;
+  const details = failures
+    .slice(0, 10)
+    .map(
+      (failure) =>
+        `${failure.companyLabel} (${failure.companyId}): ${failure.message}`,
+    )
+    .join(" | ");
+  const omitted =
+    failures.length > 10 ? ` | ${failures.length - 10} more failure(s) omitted.` : "";
+  return `${summary} ${details}${omitted}`.trim();
+}
+
+function recordBatchFailures(
+  runId: string,
+  sourceType: "brave_domains" | "company_websites",
+  failures: BatchFailure[],
+) {
+  for (const failure of failures) {
+    addAudit(
+      "discovery.company_failed",
+      "company",
+      failure.companyId,
+      `${sourceType === "brave_domains" ? "Brave domain resolution" : "Company website research"} failed: ${failure.message}`,
+      { runId, sourceType, error: failure.message },
+    );
+  }
+}
 
 export function startDiscovery(request: DiscoveryRunRequest) {
-  const run = createSourceRun(
-    request.source === "job_board" ? request.provider : request.source,
-    request,
-  );
-  if (run.created) void executeDiscovery(run.id, request);
-  return run.id;
+  const releaseOperation = reserveMutableOperation("start a discovery run");
+  try {
+    const run = createSourceRun(
+      request.source === "job_board" ? request.provider : request.source,
+      request,
+    );
+    if (run.created) {
+      void executeDiscovery(run.id, request).finally(releaseOperation);
+    } else {
+      releaseOperation();
+    }
+    return run.id;
+  } catch (error) {
+    releaseOperation();
+    throw error;
+  }
 }
 
 async function executeDiscovery(runId: string, request: DiscoveryRunRequest) {
   try {
     startSourceRun(runId);
-    let result = { inserted: 0, updated: 0, skipped: 0 };
+    let result: DiscoveryResult = { inserted: 0, updated: 0, skipped: 0 };
     switch (request.source) {
       case "datasf":
         result = await discoverDataSf(request.limit, request.technologyOnly);
@@ -44,27 +121,81 @@ async function executeDiscovery(runId: string, request: DiscoveryRunRequest) {
       case "apollo":
         result = await discoverApollo(request.limit);
         break;
-      case "brave_domains":
-        result = await resolveMissingDomains(
-          request.limit,
-          request.autoApplyHighConfidence,
-        );
-        break;
-      case "company_websites": {
-        const companyIds = listCompaniesForWebsiteResearch(request.limit);
+      case "brave_domains": {
+        const companyIds = listCompaniesMissingDomain(request.limit);
         const outcomes = await mapWithConcurrency(companyIds, 3, async (companyId) => {
+          const companyLabel = getCompany(companyId)?.name || "Unknown company";
           try {
-            const researched = await researchCompanyWebsite(companyId);
-            return researched.pagesFetched > 0;
-          } catch {
-            return false;
+            const value = await resolveCompanyDomainWithBrave(
+              companyId,
+              request.autoApplyHighConfidence,
+            );
+            return { ok: true as const, companyId, companyLabel, value };
+          } catch (error) {
+            return {
+              ok: false as const,
+              companyId,
+              companyLabel,
+              message: readableFailure(error),
+            };
           }
         });
-        const updated = outcomes.filter(Boolean).length;
+        const failures = outcomes.filter(
+          (outcome): outcome is BatchFailure & { ok: false } => !outcome.ok,
+        );
+        const successes = outcomes.filter((outcome) => outcome.ok);
+        const updated = successes.filter((outcome) => outcome.value.applied).length;
+        recordBatchFailures(runId, "brave_domains", failures);
         result = {
           inserted: 0,
           updated,
           skipped: companyIds.length - updated,
+          error: batchFailureMessage(
+            "Brave domain-resolution",
+            companyIds.length,
+            failures,
+          ),
+        };
+        break;
+      }
+      case "company_websites": {
+        const companyIds = listCompaniesForWebsiteResearch(request.limit);
+        const outcomes = await mapWithConcurrency(companyIds, 3, async (companyId) => {
+          const companyLabel = getCompany(companyId)?.name || "Unknown company";
+          try {
+            const researched = await researchCompanyWebsite(companyId);
+            if (researched.pagesFetched < 1) {
+              throw new Error("No permitted HTML pages were fetched.");
+            }
+            return {
+              ok: true as const,
+              companyId,
+              companyLabel,
+              value: researched,
+            };
+          } catch (error) {
+            return {
+              ok: false as const,
+              companyId,
+              companyLabel,
+              message: readableFailure(error),
+            };
+          }
+        });
+        const failures = outcomes.filter(
+          (outcome): outcome is BatchFailure & { ok: false } => !outcome.ok,
+        );
+        const updated = outcomes.length - failures.length;
+        recordBatchFailures(runId, "company_websites", failures);
+        result = {
+          inserted: 0,
+          updated,
+          skipped: companyIds.length - updated,
+          error: batchFailureMessage(
+            "company-website research",
+            companyIds.length,
+            failures,
+          ),
         };
         break;
       }
@@ -96,18 +227,108 @@ function valueFor(
   for (const candidate of candidates) {
     const match = entries.find(
       ([key]) =>
-        key.toLowerCase().replace(/[^a-z0-9]/g, "") ===
-        candidate.toLowerCase().replace(/[^a-z0-9]/g, ""),
+        normalizedCsvHeader(key) === normalizedCsvHeader(candidate),
     );
     if (match?.[1]?.trim()) return match[1].trim();
   }
   return undefined;
 }
 
+function normalizedCsvHeader(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+const retainedCsvEvidenceHeaders = new Set(
+  [
+    "company",
+    "company_name",
+    "name",
+    "organization",
+    "organization_name",
+    "domain",
+    "canonical_domain",
+    "website",
+    "website_url",
+    "company_url",
+    "location",
+    "city",
+    "hq_city",
+    "headquarters",
+    "company_size",
+    "size",
+    "employee_range",
+    "employee_count",
+    "employee_count_min",
+    "employees_min",
+    "employee_count_max",
+    "employees_max",
+    "employees",
+    "industry",
+    "industries",
+    "sector",
+    "tags",
+    "technology_tags",
+    "stage",
+    "funding_stage",
+    "description",
+    "company_description",
+    "company_linkedin_url",
+    "linkedin_company",
+    "yc_url",
+    "full_name",
+    "contact",
+    "contact_name",
+    "person_name",
+    "first_name",
+    "last_name",
+    "title",
+    "job_title",
+    "role",
+    "role_category",
+    "email",
+    "work_email",
+    "primary_email",
+    "email_type",
+    "email_kind",
+    "email_status",
+    "verification_status",
+    "email_verified_at",
+    "phone",
+    "primary_phone",
+    "phone_type",
+    "phone_kind",
+    "phone_confirmed",
+    "confirmed_phone",
+    "phone_source",
+    "phone_source_url",
+    "person_linkedin_url",
+    "linkedin_url",
+    "profile_url",
+    "rank",
+    "target_rank",
+    "notes",
+    "source_url",
+  ].map(normalizedCsvHeader),
+);
+
+function retainedCsvEvidenceRow(row: Record<string, string>) {
+  return Object.fromEntries(
+    Object.entries(row)
+      .filter(([key]) =>
+        retainedCsvEvidenceHeaders.has(normalizedCsvHeader(key)),
+      )
+      .map(([key, value]) => [key.slice(0, 200), value.trim().slice(0, 5_000)]),
+  );
+}
+
 function parseCount(value?: string) {
   if (!value) return null;
-  const number = Number(value.replace(/[^0-9]/g, ""));
-  return Number.isFinite(number) ? number : null;
+  const match = value.match(/\d[\d,]*/);
+  if (!match) return null;
+  const number = Number(match[0].replaceAll(",", ""));
+  return Number.isSafeInteger(number) && number >= 0 && number <= 1_000_000_000
+    ? number
+    : null;
 }
 
 function parseSizeRange(value?: string) {
@@ -128,21 +349,110 @@ export function importCsv(
   sourceLabel: string,
   mapping: Record<string, string> = {},
 ) {
+  const headerParse = Papa.parse<string[]>(csv, {
+    preview: 1,
+    skipEmptyLines: "greedy",
+  });
+  const headerError = headerParse.errors.find(
+    (error) => error.type === "Quotes",
+  );
+  if (headerError) {
+    throw badRequest(
+      `The CSV is malformed: ${headerError.message}`,
+      "invalid_csv",
+    );
+  }
+  const declaredHeaders = (headerParse.data[0] || []).map((header) =>
+    String(header).trim(),
+  );
+  if (
+    !declaredHeaders.length ||
+    declaredHeaders.some((header) => !header)
+  ) {
+    throw badRequest(
+      "The CSV must have a non-blank header for every column.",
+      "invalid_csv",
+    );
+  }
+  if (new Set(declaredHeaders).size !== declaredHeaders.length) {
+    throw badRequest("Every CSV column must have a unique header.", "invalid_csv");
+  }
+  if (declaredHeaders.length > 200) {
+    throw badRequest("A CSV import is limited to 200 columns.", "invalid_csv");
+  }
   const parsed = Papa.parse<Record<string, string>>(csv, {
     header: true,
     skipEmptyLines: "greedy",
     transformHeader: (header) => header.trim(),
   });
-  if (parsed.errors.length && !parsed.data.length) {
-    throw new Error(parsed.errors[0]?.message || "Could not parse CSV.");
+  const structuralError = parsed.errors.find((error) =>
+    ["Quotes", "FieldMismatch"].includes(error.type),
+  );
+  if (structuralError) {
+    throw badRequest(
+      `The CSV is malformed${typeof structuralError.row === "number" ? ` near row ${structuralError.row + 2}` : ""}: ${structuralError.message}`,
+      "invalid_csv",
+    );
+  }
+  const headers = parsed.meta.fields || [];
+  if (!headers.length || headers.some((header) => !header)) {
+    throw badRequest(
+      "The CSV must have a non-blank header for every column.",
+      "invalid_csv",
+    );
+  }
+  if (Object.keys(parsed.meta.renamedHeaders || {}).length) {
+    throw badRequest("Every CSV column must have a unique header.", "invalid_csv");
+  }
+  if (!parsed.data.length) {
+    throw badRequest("The CSV has a header row but no data.", "invalid_csv");
   }
   if (parsed.data.length > 10_000) {
-    throw new Error("A single CSV import is limited to 10,000 data rows.");
+    throw badRequest(
+      "A single CSV import is limited to 10,000 data rows.",
+      "invalid_csv",
+    );
+  }
+  const mappedColumns = Object.entries(mapping);
+  if (mappedColumns.length) {
+    const unknownHeader = mappedColumns.find(
+      ([sourceColumn]) => !headers.includes(sourceColumn),
+    )?.[0];
+    if (unknownHeader) {
+      throw badRequest(
+        `The CSV mapping refers to an unknown column: ${unknownHeader}.`,
+        "invalid_csv_mapping",
+      );
+    }
+    const destinations = mappedColumns
+      .map(([, destination]) => destination)
+      .filter((destination) => destination !== "ignore");
+    if (new Set(destinations).size !== destinations.length) {
+      throw badRequest(
+        "Each canonical field can be mapped from only one CSV column.",
+        "invalid_csv_mapping",
+      );
+    }
+    if (!destinations.includes("company_name")) {
+      throw badRequest(
+        "Map one CSV column to Company name before importing.",
+        "invalid_csv_mapping",
+      );
+    }
   }
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
   let contacts = 0;
+  const rowWarnings = parsed.errors.map((error) => error.message);
+  let omittedWarnings = 0;
+  const warnForRow = (rowNumber: number, message: string) => {
+    if (rowWarnings.length < 100) {
+      rowWarnings.push(`Row ${rowNumber}: ${message}`);
+    } else {
+      omittedWarnings += 1;
+    }
+  };
   const run = createSourceRun("csv", {
     sourceLabel,
     rows: parsed.data.length,
@@ -162,7 +472,9 @@ export function importCsv(
   startSourceRun(run.id);
   try {
     getDatabase().transaction(() => {
-      for (const sourceRow of parsed.data) {
+      for (const [rowIndex, sourceRow] of parsed.data.entries()) {
+      const rowNumber = rowIndex + 2;
+      try {
       const row: Record<string, string> = Object.keys(mapping).length
         ? {}
         : { ...sourceRow };
@@ -171,6 +483,9 @@ export function importCsv(
         const value = sourceRow[sourceColumn];
         if (value !== undefined && value !== "") row[canonicalField] = value;
       }
+      const evidenceRow = retainedCsvEvidenceRow(row);
+      const sourceNote = valueFor(row, ["notes"]);
+      const sourceUrl = valueFor(row, ["source_url"]) || null;
       const name = valueFor(row, [
         "company_name",
         "company",
@@ -180,6 +495,7 @@ export function importCsv(
       ]);
       if (!name) {
         skipped++;
+        warnForRow(rowNumber, "Company name is missing.");
         continue;
       }
       const industry = valueFor(row, [
@@ -192,7 +508,7 @@ export function importCsv(
       const sizeRange = parseSizeRange(
         valueFor(row, ["company_size", "size", "employee_range"]),
       );
-      const company = upsertCompany({
+      const companyCandidate = {
         name,
         domain: valueFor(row, ["domain", "canonical_domain"]),
         websiteUrl: valueFor(row, ["website", "website_url", "company_url"]),
@@ -215,15 +531,28 @@ export function importCsv(
           ? industry.split(/[,;|]/).map((value) => value.trim()).filter(Boolean)
           : [],
         stage: valueFor(row, ["stage", "funding_stage"]),
-        status: "needs_research",
-      });
-      patchCompany(company.id, {
-        reviewed: false,
-        status: "needs_research",
-        ...(valueFor(row, ["notes"])
-          ? { notes: valueFor(row, ["notes"]) }
-          : {}),
-      });
+      } as const;
+      const companyParsed = CompanyPatchSchema.extend({
+        name: CompanyPatchSchema.shape.name.unwrap(),
+      }).safeParse(companyCandidate);
+      if (
+        !companyParsed.success ||
+        (companyParsed.data.employeeCountMin !== null &&
+          companyParsed.data.employeeCountMin !== undefined &&
+          companyParsed.data.employeeCountMax !== null &&
+          companyParsed.data.employeeCountMax !== undefined &&
+          companyParsed.data.employeeCountMin > companyParsed.data.employeeCountMax)
+      ) {
+        skipped++;
+        warnForRow(
+          rowNumber,
+          companyParsed.success
+            ? "Minimum employees exceeds maximum employees."
+            : companyParsed.error.issues[0]?.message || "Company fields are invalid.",
+        );
+        continue;
+      }
+      const company = upsertCompany(companyParsed.data);
       company.inserted ? inserted++ : updated++;
       addEvidence({
         entityType: "company",
@@ -233,9 +562,23 @@ export function importCsv(
         sourceType: "csv",
         sourceLabel,
         confidence: 0.5,
-        sourceUrl: valueFor(row, ["source_url"]) || null,
-        payload: { runId: run.id, row },
+        sourceUrl,
+        payload: { runId: run.id, row: evidenceRow },
       });
+      if (sourceNote) {
+        addEvidence({
+          entityType: "company",
+          entityId: company.id,
+          fieldName: "source_note",
+          value: sourceNote,
+          sourceType: "csv",
+          sourceLabel,
+          sourceUrl,
+          excerpt: sourceNote,
+          confidence: 0.5,
+          payload: { runId: run.id, rowNumber },
+        });
+      }
 
       const firstName = valueFor(row, ["first_name"]);
       const lastName = valueFor(row, ["last_name"]);
@@ -257,7 +600,7 @@ export function importCsv(
           "source_url",
           "notes",
         ]);
-        const contact = addContact(company.id, {
+        const contactCandidate = {
           fullName,
           firstName,
           lastName,
@@ -305,10 +648,19 @@ export function importCsv(
             ),
           ),
           status: "candidate",
-          ...(valueFor(row, ["notes"])
-            ? { notes: valueFor(row, ["notes"]) }
-            : {}),
-        });
+          ...(sourceNote ? { notes: sourceNote } : {}),
+        };
+        const contactParsed = ContactPatchSchema.extend({
+          fullName: ContactPatchSchema.shape.fullName.unwrap(),
+        }).safeParse(contactCandidate);
+        if (!contactParsed.success) {
+          warnForRow(
+            rowNumber,
+            `Contact skipped: ${contactParsed.error.issues[0]?.message || "invalid contact fields"}.`,
+          );
+          continue;
+        }
+        const contact = addContact(company.id, contactParsed.data);
         if (contact) {
           contacts++;
           addEvidence({
@@ -319,10 +671,17 @@ export function importCsv(
             sourceType: "csv",
             sourceLabel,
             confidence: 0.5,
-            sourceUrl: valueFor(row, ["source_url"]) || null,
-            payload: { runId: run.id, row },
+            sourceUrl,
+            payload: { runId: run.id, row: evidenceRow },
           });
         }
+      }
+      } catch (error) {
+        skipped++;
+        warnForRow(
+          rowNumber,
+          error instanceof Error ? error.message : "The row could not be imported.",
+        );
       }
       }
     })();
@@ -332,7 +691,12 @@ export function importCsv(
       updated,
       skipped,
       contacts,
-      parseWarnings: parsed.errors.map((error) => error.message),
+      parseWarnings: [
+        ...rowWarnings,
+        ...(omittedWarnings
+          ? [`${omittedWarnings} additional row warning(s) omitted.`]
+          : []),
+      ],
     };
     finishSourceRun(run.id, result);
     return result;

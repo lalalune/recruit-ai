@@ -1,5 +1,74 @@
 import { z } from "zod";
 
+export const HttpUrlSchema = z
+  .string()
+  .trim()
+  .max(2_048)
+  .url()
+  .refine((value) => {
+    const parsed = new URL(value);
+    return (
+      ["http:", "https:"].includes(parsed.protocol) &&
+      !parsed.username &&
+      !parsed.password
+    );
+  }, "Use an HTTP(S) URL without embedded credentials.");
+
+const OptionalHttpUrlSchema = z
+  .union([HttpUrlSchema, z.string().trim().length(0)])
+  .optional()
+  .nullable();
+
+const OptionalEmailSchema = z
+  .union([z.string().trim().max(320).email(), z.string().trim().length(0)])
+  .optional()
+  .nullable();
+
+const OptionalCompanyDomainSchema = z
+  .union([
+    z
+      .string()
+      .trim()
+      .max(2_048)
+      .refine((value) => {
+        if (!value) return true;
+        try {
+          const url = value.includes("://")
+            ? new URL(value)
+            : new URL(`https://${value}`);
+          if (
+            !["http:", "https:"].includes(url.protocol) ||
+            url.username ||
+            url.password
+          ) {
+            return false;
+          }
+          const hostname = url.hostname
+            .replace(/^www\./i, "")
+            .replace(/\.$/, "")
+            .toLowerCase();
+          const labels = hostname.split(".");
+          return (
+            hostname.length <= 253 &&
+            labels.length >= 2 &&
+            !/^\d+(?:\.\d+){3}$/.test(hostname) &&
+            labels.every(
+              (label) =>
+                label.length >= 1 &&
+                label.length <= 63 &&
+                /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+            ) &&
+            !/^\d+$/.test(labels.at(-1) || "")
+          );
+        } catch {
+          return false;
+        }
+      }, "Enter a public domain or HTTP(S) company URL."),
+    z.string().trim().length(0),
+  ])
+  .optional()
+  .nullable();
+
 export const companyStatuses = [
   "new",
   "needs_research",
@@ -31,17 +100,17 @@ export const emailStatuses = [
 export const priorityLevels = ["high", "medium", "low"] as const;
 
 export const CompanyPatchSchema = z.object({
-  name: z.string().trim().min(1).optional(),
-  domain: z.string().trim().optional().nullable(),
-  websiteUrl: z.string().trim().optional().nullable(),
-  linkedinUrl: z.string().trim().optional().nullable(),
-  ycUrl: z.string().trim().optional().nullable(),
-  description: z.string().trim().optional().nullable(),
-  location: z.string().trim().optional().nullable(),
-  employeeCountMin: z.number().int().nonnegative().optional().nullable(),
-  employeeCountMax: z.number().int().nonnegative().optional().nullable(),
-  industries: z.array(z.string()).optional(),
-  stage: z.string().trim().optional().nullable(),
+  name: z.string().trim().min(1).max(500).optional(),
+  domain: OptionalCompanyDomainSchema,
+  websiteUrl: OptionalHttpUrlSchema,
+  linkedinUrl: OptionalHttpUrlSchema,
+  ycUrl: OptionalHttpUrlSchema,
+  description: z.string().trim().max(20_000).optional().nullable(),
+  location: z.string().trim().max(500).optional().nullable(),
+  employeeCountMin: z.number().int().min(0).max(10_000_000).optional().nullable(),
+  employeeCountMax: z.number().int().min(0).max(10_000_000).optional().nullable(),
+  industries: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
+  stage: z.string().trim().max(200).optional().nullable(),
   status: z.enum(companyStatuses).optional(),
   priority: z.enum(priorityLevels).optional(),
   fitConfirmed: z.boolean().optional(),
@@ -64,65 +133,75 @@ export const CompanyPatchSchema = z.object({
     .optional()
     .nullable(),
   exclusionNote: z.string().max(2_000).optional().nullable(),
-  notes: z.string().optional().nullable(),
+  notes: z.string().max(20_000).optional().nullable(),
   reviewed: z.boolean().optional(),
-});
+}).strict();
 
 export const ContactPatchSchema = z.object({
-  firstName: z.string().trim().optional().nullable(),
-  lastName: z.string().trim().optional().nullable(),
-  fullName: z.string().trim().min(1).optional(),
-  title: z.string().trim().optional().nullable(),
-  roleCategory: z.string().trim().optional().nullable(),
-  email: z.string().trim().optional().nullable(),
+  firstName: z.string().trim().max(200).optional().nullable(),
+  lastName: z.string().trim().max(200).optional().nullable(),
+  fullName: z.string().trim().min(1).max(500).optional(),
+  title: z.string().trim().max(500).optional().nullable(),
+  roleCategory: z.string().trim().max(200).optional().nullable(),
+  email: OptionalEmailSchema,
   emailType: z.enum(["work", "personal", "generic", "unknown"]).optional(),
   fallbackReason: z.string().trim().max(1_000).optional().nullable(),
   fallbackConfirmed: z.boolean().optional(),
   emailStatus: z.enum(emailStatuses).optional(),
   emailVerifiedAt: z.string().optional().nullable(),
-  phone: z.string().trim().optional().nullable(),
+  phone: z.string().trim().max(100).optional().nullable(),
   phoneType: z.enum(["business", "direct", "mobile", "switchboard", "unknown"]).optional(),
   phoneConfirmed: z.boolean().optional(),
   phoneSource: z.string().trim().max(1_000).optional().nullable(),
-  linkedinUrl: z.string().trim().optional().nullable(),
+  linkedinUrl: OptionalHttpUrlSchema,
   employmentConfirmed: z.boolean().optional(),
   observedTitle: z.string().trim().max(500).optional().nullable(),
-  employmentObservedAt: z.string().optional().nullable(),
+  employmentObservedAt: z.string().max(100).optional().nullable(),
   rank: z.number().int().min(1).max(99).optional(),
   status: z.enum(contactStatuses).optional(),
   reviewed: z.boolean().optional(),
-  notes: z.string().optional().nullable(),
-});
+  notes: z.string().max(20_000).optional().nullable(),
+}).strict();
 
 export const DiscoveryRunSchema = z.discriminatedUnion("source", [
-  z.object({
-    source: z.literal("datasf"),
-    limit: z.number().int().min(1).max(10_000).default(500),
-    technologyOnly: z.boolean().default(true),
-  }),
-  z.object({
-    source: z.literal("hackernews"),
-    limit: z.number().int().min(1).max(500).default(100),
-  }),
-  z.object({
-    source: z.literal("apollo"),
-    limit: z.number().int().min(1).max(10_000).default(500),
-  }),
-  z.object({
-    source: z.literal("brave_domains"),
-    limit: z.number().int().min(1).max(10_000).default(250),
-    autoApplyHighConfidence: z.boolean().default(false),
-  }),
-  z.object({
-    source: z.literal("company_websites"),
-    limit: z.number().int().min(1).max(10_000).default(250),
-  }),
+  z
+    .object({
+      source: z.literal("datasf"),
+      limit: z.number().int().min(1).max(10_000).default(500),
+      technologyOnly: z.boolean().default(true),
+    })
+    .strict(),
+  z
+    .object({
+      source: z.literal("hackernews"),
+      limit: z.number().int().min(1).max(500).default(100),
+    })
+    .strict(),
+  z
+    .object({
+      source: z.literal("apollo"),
+      limit: z.number().int().min(1).max(10_000).default(500),
+    })
+    .strict(),
+  z
+    .object({
+      source: z.literal("brave_domains"),
+      limit: z.number().int().min(1).max(10_000).default(250),
+      autoApplyHighConfidence: z.boolean().default(false),
+    })
+    .strict(),
+  z
+    .object({
+      source: z.literal("company_websites"),
+      limit: z.number().int().min(1).max(10_000).default(250),
+    })
+    .strict(),
   z.object({
     source: z.literal("job_board"),
     provider: z.enum(["greenhouse", "lever", "ashby"]),
-    identifier: z.string().trim().min(1),
+    identifier: z.string().trim().min(1).max(500),
     companyId: z.string().uuid().optional(),
-  }),
+  }).strict(),
 ]);
 
 export const CsvImportSchema = z.object({
@@ -162,13 +241,16 @@ export const CsvImportSchema = z.object({
         "source_url",
       ]),
     )
+    .refine((value) => Object.keys(value).length <= 200, {
+      message: "A CSV import is limited to 200 mapped columns.",
+    })
     .optional(),
-});
+}).strict();
 
 export const DraftRequestSchema = z.object({
   contactId: z.string().uuid(),
   tone: z.enum(["concise", "technical", "founder"]).default("concise"),
-});
+}).strict();
 
 export const SettingsPatchSchema = z
   .object({

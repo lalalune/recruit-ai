@@ -1,21 +1,29 @@
 import { addEvidence, upsertCompany } from "../repository";
 import { getSecret } from "../secrets";
-import { fetchWithTimeout } from "./http";
+import { z } from "zod";
+import { badRequest, upstreamFailure } from "../errors";
+import { fetchProviderResponse, readBoundedJson } from "./http";
 
-interface DataSfRow {
-  dba_name?: string;
-  ownership_name?: string;
-  full_business_address?: string;
-  business_address?: string;
-  city?: string;
-  state?: string;
-  business_zip?: string;
-  naics_code?: string;
-  location_start_date?: string;
-  location_end_date?: string;
-  certificate_number?: string;
-  uniqueid?: string;
-}
+const DataSfName = z.string().max(500);
+const DataSfAddress = z.string().max(500);
+const DataSfRowSchema = z.object({
+  dba_name: DataSfName.optional(),
+  ownership_name: DataSfName.optional(),
+  full_business_address: DataSfAddress.optional(),
+  business_address: DataSfAddress.optional(),
+  city: z.string().max(200).optional(),
+  state: z.string().max(200).optional(),
+  business_zip: z.string().max(100).optional(),
+  naics_code: z.string().max(100).optional(),
+  location_start_date: z.string().max(100).optional(),
+  location_end_date: z.string().max(100).optional(),
+  certificate_number: z.string().max(500).optional(),
+  uniqueid: z.string().max(500).optional(),
+});
+const DataSfRowsSchema = z.array(DataSfRowSchema).max(1_000);
+const MAX_DATASF_PAGES = 50;
+const MAX_DATASF_ROWS_SCANNED = 50_000;
+const DATASF_SCAN_MULTIPLIER = 5;
 
 const technologyPrefixes = [
   "334",
@@ -38,27 +46,65 @@ export async function discoverDataSf(
   limit: number,
   technologyOnly: boolean,
 ) {
-  const pageSize = Math.min(1000, limit);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+    throw badRequest("DataSF discovery limit must be an integer from 1 to 10,000.");
+  }
+  const pageSize = Math.min(1_000, limit);
+  const rowScanBudget = Math.min(
+    MAX_DATASF_ROWS_SCANNED,
+    Math.max(pageSize, limit * DATASF_SCAN_MULTIPLIER),
+  );
   const token = getSecret("SOCRATA_APP_TOKEN");
   let offset = 0;
+  let pagesScanned = 0;
+  let rowsScanned = 0;
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
   const seen = new Set<string>();
 
-  while (inserted + updated < limit) {
+  while (
+    inserted + updated < limit &&
+    pagesScanned < MAX_DATASF_PAGES &&
+    rowsScanned < rowScanBudget
+  ) {
+    const requestedPageSize = Math.min(
+      pageSize,
+      rowScanBudget - rowsScanned,
+    );
     const query = new URLSearchParams({
-      $limit: String(pageSize),
+      $limit: String(requestedPageSize),
       $offset: String(offset),
       $order: "location_start_date DESC",
     });
-    const response = await fetchWithTimeout(
+    const response = await fetchProviderResponse(
+      "DataSF",
       `https://data.sfgov.org/resource/g8m3-pdis.json?${query}`,
       token ? { headers: { "X-App-Token": token } } : {},
       30_000,
     );
-    const rows = (await response.json()) as DataSfRow[];
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw upstreamFailure(
+        `DataSF rejected the request (HTTP ${response.status}).`,
+        "datasf_request_rejected",
+      );
+    }
+    const rows = await readBoundedJson(
+      response,
+      "DataSF",
+      DataSfRowsSchema,
+      5_000_000,
+    );
+    pagesScanned++;
+    if (rows.length > requestedPageSize) {
+      throw upstreamFailure(
+        "DataSF returned more rows than requested.",
+        "datasf_payload_invalid",
+      );
+    }
     if (!rows.length) break;
+    rowsScanned += rows.length;
 
     for (const row of rows) {
       if (inserted + updated >= limit) break;
@@ -113,7 +159,7 @@ export async function discoverDataSf(
       });
     }
     offset += rows.length;
-    if (rows.length < pageSize) break;
+    if (rows.length < requestedPageSize) break;
   }
   return { inserted, updated, skipped };
 }

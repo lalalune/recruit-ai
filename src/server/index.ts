@@ -1,33 +1,46 @@
 import webApp from "../../index.html";
 import { createApp } from "./app";
+import { recoverInterruptedRestore } from "./dataManagement";
 import { getDatabase } from "./database";
+import { acquireInstanceLock } from "./instanceLock";
 import { repairMissingCompanyStats } from "./repository";
 
+acquireInstanceLock();
+recoverInterruptedRestore();
 const app = createApp();
 getDatabase();
 repairMissingCompanyStats();
 
 const port = Number(process.env.RECRUITAI_PORT || 4317);
+if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+  throw new Error("RECRUITAI_PORT must be an integer from 1 through 65535.");
+}
 const development = process.env.RECRUITAI_DEV === "1";
+function apiHandler(request: Request, server: Bun.Server<undefined>) {
+  server.timeout(request, 0);
+  return app.fetch(request);
+}
 
 const server = development
   ? Bun.serve({
       hostname: "127.0.0.1",
       port,
+      maxRequestBodySize: 600 * 1024 * 1024,
       development: true,
       routes: {
-        "/api/*": (request) => app.fetch(request),
+        "/api/*": apiHandler,
       },
-      fetch: (request) => app.fetch(request),
+      fetch: apiHandler,
     })
   : Bun.serve({
       hostname: "127.0.0.1",
       port,
+      maxRequestBodySize: 600 * 1024 * 1024,
       routes: {
-        "/api/*": (request) => app.fetch(request),
+        "/api/*": apiHandler,
         "/*": webApp,
       },
-      fetch: (request) => app.fetch(request),
+      fetch: apiHandler,
     });
 
 const url = `http://${server.hostname}:${server.port}`;

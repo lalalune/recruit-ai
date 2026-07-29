@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowLeft,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -30,7 +31,7 @@ import {
   Textarea,
 } from "../components/ui";
 import { api } from "../lib/api";
-import { Link, useParams } from "../lib/router";
+import { Link, useParams, useSearchParams } from "../lib/router";
 
 type DraftFilter = "active" | "approved" | "all";
 
@@ -58,15 +59,17 @@ function titleCase(value: string) {
 function DraftQueueRow({
   draft,
   active,
+  queryString,
 }: {
   draft: OutreachDraft;
   active: boolean;
+  queryString: string;
 }) {
   return (
     <Link
       aria-current={active ? "page" : undefined}
       className={`draft-queue-row ${active ? "is-active" : ""}`}
-      to={`/outreach/${draft.id}`}
+      to={`/outreach/${draft.id}${queryString ? `?${queryString}` : ""}`}
     >
       <div className="draft-queue-row__heading">
         <strong>{draft.companyName}</strong>
@@ -99,7 +102,13 @@ function ChecklistItem({
   );
 }
 
-function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
+function DraftWorkspace({
+  draft,
+  queueQuery,
+}: {
+  draft: OutreachDraft;
+  queueQuery: string;
+}) {
   const queryClient = useQueryClient();
   const [subject, setSubject] = useState(draft.subject);
   const [body, setBody] = useState(draft.body);
@@ -109,6 +118,10 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
     "replied" | "bounced" | "no_response" | null
   >(null);
   const [outcomeNote, setOutcomeNote] = useState("");
+  const [sendResolution, setSendResolution] = useState<
+    "sent" | "not_sent" | null
+  >(null);
+  const [resolutionNote, setResolutionNote] = useState("");
 
   useEffect(() => {
     setSubject(draft.subject);
@@ -133,7 +146,10 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
             : {}),
       }),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["drafts"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["drafts"] }),
+        queryClient.invalidateQueries({ queryKey: ["draft", draft.id] }),
+      ]);
     },
   });
   const sendMutation = useMutation({
@@ -144,6 +160,7 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["drafts"] }),
+        queryClient.invalidateQueries({ queryKey: ["draft", draft.id] }),
         queryClient.invalidateQueries({ queryKey: ["gmail-status"] }),
         queryClient.invalidateQueries({ queryKey: ["company", draft.companyId] }),
       ]);
@@ -167,6 +184,41 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
       ]);
     },
   });
+  const resolveSendMutation = useMutation({
+    mutationFn: () =>
+      api.resolveUnknownSend(
+        draft.id,
+        sendResolution as "sent" | "not_sent",
+        resolutionNote,
+      ),
+    onSuccess: () => {
+      setSendResolution(null);
+      setResolutionNote("");
+    },
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["drafts"] }),
+        queryClient.invalidateQueries({ queryKey: ["draft", draft.id] }),
+        queryClient.invalidateQueries({
+          queryKey: ["company", draft.companyId],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["gmail-status"] }),
+      ]);
+    },
+  });
+  useEffect(() => {
+    if (outcome !== null) return;
+    setOutcomeNote("");
+    outcomeMutation.reset();
+  }, [outcome]);
+  useEffect(() => {
+    setOutcome(null);
+    setOutcomeNote("");
+    outcomeMutation.reset();
+    setSendResolution(null);
+    setResolutionNote("");
+    resolveSendMutation.reset();
+  }, [draft.id]);
 
   const contact = company.data?.contacts.find((item) => item.id === draft.contactId);
   const validEmail = contact?.emailStatus === "valid";
@@ -215,9 +267,12 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
   const senderName = settingText("sender_name");
   const exactMessage = `${body.trim()}\n\n—\n${[
     senderName,
+    settingText("organization_name"),
     settingText("postal_address"),
     settingText("opt_out_text"),
-  ].join("\n")}`;
+  ]
+    .filter(Boolean)
+    .join("\n")}`;
 
   async function copyDraft() {
     await navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`);
@@ -229,6 +284,13 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
     <div className="draft-workspace">
       <header className="draft-header">
         <div>
+          <Link
+            className="mobile-back-link"
+            to={`/outreach${queueQuery ? `?${queueQuery}` : ""}`}
+          >
+            <ArrowLeft size={15} />
+            Drafts
+          </Link>
           <div className="draft-title-row">
             <h2>{draft.companyName}</h2>
             <Badge tone={statusTone(draft.status)}>{titleCase(draft.status)}</Badge>
@@ -275,10 +337,23 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
             <InlineNotice tone="danger">{saveMutation.error.message}</InlineNotice>
           ) : null}
           {draft.status === "send_unknown" ? (
-            <InlineNotice tone="danger">
-              Gmail delivery could not be confirmed. Check the Sent folder before any
-              further action for this contact; this record is locked against retry.
-            </InlineNotice>
+            <div className="send-unknown-resolution">
+              <InlineNotice tone="danger">
+                Gmail delivery could not be confirmed. Check the connected
+                account’s Sent folder before taking any further action.
+              </InlineNotice>
+              <div className="button-group">
+                <Button
+                  onClick={() => setSendResolution("sent")}
+                  variant="secondary"
+                >
+                  Found in Sent
+                </Button>
+                <Button onClick={() => setSendResolution("not_sent")}>
+                  Confirm not sent
+                </Button>
+              </div>
+            </div>
           ) : null}
           <div className="message-editor__actions">
             <Button onClick={copyDraft}>
@@ -503,6 +578,66 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
               </div>
             </div>
           </Dialog>
+          <Dialog
+            description={
+              sendResolution === "sent"
+                ? "This records the attempt as sent and preserves it in history."
+                : "This returns the approved draft only after you confirm no copy exists in Gmail Sent mail."
+            }
+            onOpenChange={(open) => {
+              if (!open) {
+                setSendResolution(null);
+                setResolutionNote("");
+                resolveSendMutation.reset();
+              }
+            }}
+            open={sendResolution !== null}
+            title={
+              sendResolution === "sent"
+                ? "Confirm message was sent"
+                : "Confirm message was not sent"
+            }
+            trigger={<span aria-hidden="true" hidden />}
+          >
+            <div className="dialog-form">
+              <label className="field">
+                <span>Gmail check note</span>
+                <Textarea
+                  onChange={(event) => setResolutionNote(event.target.value)}
+                  placeholder="For example: checked sender@gmail.com Sent mail at 2:15 PM"
+                  rows={3}
+                  value={resolutionNote}
+                />
+              </label>
+              {resolveSendMutation.error ? (
+                <InlineNotice tone="danger">
+                  {resolveSendMutation.error.message}
+                </InlineNotice>
+              ) : null}
+              <div className="dialog-actions">
+                <Button
+                  onClick={() => {
+                    setSendResolution(null);
+                    setResolutionNote("");
+                    resolveSendMutation.reset();
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  disabled={
+                    !resolutionNote.trim() || resolveSendMutation.isPending
+                  }
+                  onClick={() => resolveSendMutation.mutate()}
+                  variant={sendResolution === "sent" ? "primary" : "secondary"}
+                >
+                  {resolveSendMutation.isPending
+                    ? "Recording…"
+                    : "Record resolution"}
+                </Button>
+              </div>
+            </div>
+          </Dialog>
           <Link className="text-link send-settings-link" to="/settings">
             <Settings2 size={14} />
             Review sending settings
@@ -544,7 +679,11 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
                   : "A reply stops further company outreach."
             }
             onOpenChange={(open) => {
-              if (!open) setOutcome(null);
+              if (!open) {
+                setOutcome(null);
+                setOutcomeNote("");
+                outcomeMutation.reset();
+              }
             }}
             open={Boolean(outcome)}
             title={`Mark ${outcome ? titleCase(outcome) : "outcome"}?`}
@@ -564,7 +703,15 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
                 <InlineNotice tone="danger">{outcomeMutation.error.message}</InlineNotice>
               ) : null}
               <div className="dialog-actions">
-                <Button onClick={() => setOutcome(null)}>Cancel</Button>
+                <Button
+                  onClick={() => {
+                    setOutcome(null);
+                    setOutcomeNote("");
+                    outcomeMutation.reset();
+                  }}
+                >
+                  Cancel
+                </Button>
                 <Button
                   disabled={outcomeMutation.isPending}
                   onClick={() => outcomeMutation.mutate()}
@@ -592,9 +739,24 @@ function DraftWorkspace({ draft }: { draft: OutreachDraft }) {
 
 export function OutreachPage() {
   const { draftId } = useParams();
-  const [filter, setFilter] = useState<DraftFilter>("active");
-  const [page, setPage] = useState(0);
+  const [urlParams, setUrlParams] = useSearchParams();
+  const requestedFilter = urlParams.get("view");
+  const filter: DraftFilter = ["active", "approved", "all"].includes(
+    requestedFilter || "",
+  )
+    ? (requestedFilter as DraftFilter)
+    : "active";
+  const requestedPage = Number(urlParams.get("page"));
+  const page =
+    Number.isInteger(requestedPage) && requestedPage >= 0 ? requestedPage : 0;
   const pageSize = 50;
+  const queueQuery = urlParams.toString();
+  function setQueueState(nextFilter: DraftFilter, nextPage: number) {
+    const next = new URLSearchParams();
+    if (nextFilter !== "active") next.set("view", nextFilter);
+    if (nextPage > 0) next.set("page", String(nextPage));
+    setUrlParams(next);
+  }
   const params = useMemo(
     () =>
       new URLSearchParams({
@@ -608,8 +770,13 @@ export function OutreachPage() {
     queryKey: ["drafts", params.toString()],
     queryFn: () => api.drafts(params),
   });
+  const directDraft = useQuery({
+    enabled: Boolean(draftId),
+    queryKey: ["draft", draftId],
+    queryFn: () => api.draft(draftId as string),
+  });
   const items = drafts.data?.data || [];
-  const selected = items.find((draft) => draft.id === draftId) || items[0];
+  const selected = draftId ? directDraft.data : items[0];
 
   return (
     <div className="page page--outreach">
@@ -628,8 +795,7 @@ export function OutreachPage() {
               aria-label="Filter drafts"
               className="select select--compact"
               onChange={(event) => {
-                setFilter(event.target.value as DraftFilter);
-                setPage(0);
+                setQueueState(event.target.value as DraftFilter, 0);
               }}
               value={filter}
             >
@@ -647,7 +813,12 @@ export function OutreachPage() {
               <InlineNotice tone="danger">{drafts.error.message}</InlineNotice>
             ) : items.length ? (
               items.map((draft) => (
-                <DraftQueueRow active={selected?.id === draft.id} draft={draft} key={draft.id} />
+                <DraftQueueRow
+                  active={selected?.id === draft.id}
+                  draft={draft}
+                  key={draft.id}
+                  queryString={queueQuery}
+                />
               ))
             ) : (
               <EmptyState
@@ -666,7 +837,7 @@ export function OutreachPage() {
               <Button
                 aria-label="Previous draft page"
                 disabled={page === 0}
-                onClick={() => setPage((current) => Math.max(0, current - 1))}
+                onClick={() => setQueueState(filter, Math.max(0, page - 1))}
                 variant="ghost"
               >
                 <ChevronLeft size={14} />
@@ -679,7 +850,7 @@ export function OutreachPage() {
               <Button
                 aria-label="Next draft page"
                 disabled={(page + 1) * pageSize >= drafts.data.meta.total}
-                onClick={() => setPage((current) => current + 1)}
+                onClick={() => setQueueState(filter, page + 1)}
                 variant="ghost"
               >
                 <ChevronRight size={14} />
@@ -688,8 +859,29 @@ export function OutreachPage() {
           ) : null}
         </aside>
         <section className="draft-workspace-panel">
-          {selected ? (
-            <DraftWorkspace draft={selected} />
+          {directDraft.isLoading && draftId ? (
+            <div className="workspace-loading">
+              <Spinner label="Loading draft" />
+            </div>
+          ) : directDraft.error && draftId ? (
+            <EmptyState
+              action={
+                <Link
+                  className="button button--primary"
+                  to={`/outreach${queueQuery ? `?${queueQuery}` : ""}`}
+                >
+                  Back to drafts
+                </Link>
+              }
+              body={directDraft.error.message}
+              title="Draft could not be opened"
+            />
+          ) : selected ? (
+            <DraftWorkspace
+              draft={selected}
+              key={selected.id}
+              queueQuery={queueQuery}
+            />
           ) : (
             <EmptyState
               action={

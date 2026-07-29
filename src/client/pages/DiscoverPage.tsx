@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse/papaparse.min.js";
+import type { ParseResult } from "papaparse";
 import {
   ArrowUpRight,
   Database,
@@ -183,6 +184,7 @@ export function DiscoverPage() {
   const [csvRowCount, setCsvRowCount] = useState(0);
   const [csvMapping, setCsvMapping] = useState<Record<string, string>>({});
   const [csvError, setCsvError] = useState("");
+  const [csvParsing, setCsvParsing] = useState(false);
   const [importResult, setImportResult] = useState<{
     inserted: number;
     updated: number;
@@ -190,6 +192,7 @@ export function DiscoverPage() {
     contacts: number;
   } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const csvParseSequence = useRef(0);
   const defaultsApplied = useRef(false);
 
   const dashboard = useQuery({
@@ -263,19 +266,23 @@ export function DiscoverPage() {
         queryClient.invalidateQueries({ queryKey: ["companies"] }),
       ]);
       if (
-        mode === "csv" &&
         result &&
         typeof result === "object" &&
-        "inserted" in result
+        "inserted" in result &&
+        typeof result.inserted === "number" &&
+        "updated" in result &&
+        typeof result.updated === "number" &&
+        "skipped" in result &&
+        typeof result.skipped === "number" &&
+        "contacts" in result &&
+        typeof result.contacts === "number"
       ) {
-        setImportResult(
-          result as {
-            inserted: number;
-            updated: number;
-            skipped: number;
-            contacts: number;
-          },
-        );
+        setImportResult({
+          inserted: result.inserted,
+          updated: result.updated,
+          skipped: result.skipped,
+          contacts: result.contacts,
+        });
       }
     },
   });
@@ -300,37 +307,117 @@ export function DiscoverPage() {
     [dashboard.data, dashboard.isLoading],
   );
 
+  function clearCsvSelection(resetInput = true) {
+    setCsv("");
+    setCsvFileName("");
+    setCsvFileSize(0);
+    setCsvHeaders([]);
+    setCsvPreview([]);
+    setCsvRowCount(0);
+    setCsvMapping({});
+    setImportResult(null);
+    if (resetInput && fileInput.current) fileInput.current.value = "";
+  }
+
+  function parseCsvFile(file: File) {
+    return new Promise<ParseResult<Record<string, string>>>((resolve, reject) => {
+      Papa.parse<Record<string, string>>(file, {
+        header: true,
+        skipEmptyLines: "greedy",
+        worker: true,
+        complete: resolve,
+        error: reject,
+      });
+    });
+  }
+
   async function handleFile(file?: File) {
     if (!file) return;
+    const sequence = ++csvParseSequence.current;
     setCsvError("");
-    setImportResult(null);
+    clearCsvSelection(false);
     if (file.size > 20 * 1024 * 1024) {
-      setCsvError("Choose a CSV smaller than 20 MB for the local import flow.");
+      setCsvError("Choose a CSV no larger than 20 MB.");
+      if (fileInput.current) fileInput.current.value = "";
       return;
     }
-    const text = await file.text();
-    const parsed = Papa.parse<Record<string, string>>(text, {
-      header: true,
-      skipEmptyLines: "greedy",
-      transformHeader: (header) => header.trim(),
-    });
-    const headers = parsed.meta.fields || [];
-    if (!headers.length || !parsed.data.length) {
-      setCsvError(parsed.errors[0]?.message || "The CSV has no header row or data.");
-      return;
+    setCsvParsing(true);
+    try {
+      const [text, parsed] = await Promise.all([file.text(), parseCsvFile(file)]);
+      if (sequence !== csvParseSequence.current) return;
+      const rawHeaders = parsed.meta.fields || [];
+      const headers = rawHeaders.map((header) => header.trim());
+      const structuralError = parsed.errors.find((error) =>
+        ["Quotes", "FieldMismatch"].includes(error.type),
+      );
+      if (structuralError) {
+        setCsvError(
+          `The CSV is malformed${typeof structuralError.row === "number" ? ` near row ${structuralError.row + 2}` : ""}: ${structuralError.message}`,
+        );
+        if (fileInput.current) fileInput.current.value = "";
+        return;
+      }
+      if (parsed.meta.renamedHeaders) {
+        setCsvError("Every CSV column must have a unique header.");
+        if (fileInput.current) fileInput.current.value = "";
+        return;
+      }
+      if (!headers.length || headers.some((header) => !header)) {
+        setCsvError("The CSV must have a non-blank header for every column.");
+        if (fileInput.current) fileInput.current.value = "";
+        return;
+      }
+      if (new Set(headers).size !== headers.length) {
+        setCsvError("Every CSV column must have a unique header.");
+        if (fileInput.current) fileInput.current.value = "";
+        return;
+      }
+      if (headers.length > 200) {
+        setCsvError("A CSV import is limited to 200 columns.");
+        if (fileInput.current) fileInput.current.value = "";
+        return;
+      }
+      if (!parsed.data.length) {
+        setCsvError("The CSV has a header row but no data.");
+        if (fileInput.current) fileInput.current.value = "";
+        return;
+      }
+      if (parsed.data.length > 10_000) {
+        setCsvError("A single CSV import is limited to 10,000 data rows.");
+        if (fileInput.current) fileInput.current.value = "";
+        return;
+      }
+      setCsv(text);
+      setCsvFileName(file.name);
+      setCsvFileSize(file.size);
+      setSourceLabel(file.name.replace(/\.csv$/i, "") || "CSV import");
+      setCsvHeaders(headers);
+      setCsvPreview(
+        parsed.data.slice(0, 5).map((row) =>
+          Object.fromEntries(
+            rawHeaders.map((header, index) => [
+              headers[index],
+              row[header] ?? "",
+            ]),
+          ),
+        ),
+      );
+      setCsvRowCount(parsed.data.length);
+      setCsvMapping(autoCsvMapping(headers));
+    } catch (error) {
+      if (sequence !== csvParseSequence.current) return;
+      setCsvError(
+        error instanceof Error ? error.message : "The CSV could not be read.",
+      );
+      if (fileInput.current) fileInput.current.value = "";
+    } finally {
+      if (sequence === csvParseSequence.current) setCsvParsing(false);
     }
-    setCsv(text);
-    setCsvFileName(file.name);
-    setCsvFileSize(file.size);
-    setSourceLabel(file.name.replace(/\.csv$/i, ""));
-    setCsvHeaders(headers);
-    setCsvPreview(parsed.data.slice(0, 5));
-    setCsvRowCount(parsed.data.length);
-    setCsvMapping(autoCsvMapping(headers));
   }
 
   const disabled =
     runMutation.isPending ||
+    csvParsing ||
     hasRunning ||
     (mode === "job_board" && !identifier.trim()) ||
     (mode === "csv" &&
@@ -552,12 +639,24 @@ export function DiscoverPage() {
               />
               <button
                 className="file-drop"
+                disabled={csvParsing}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  handleFile(event.dataTransfer.files[0]);
+                }}
                 onClick={() => fileInput.current?.click()}
                 type="button"
               >
                 <FileUp size={22} />
                 <span>
-                  <strong>{csv ? sourceLabel : "Choose a CSV file"}</strong>
+                  <strong>
+                    {csvParsing
+                      ? "Reading CSV…"
+                      : csv
+                        ? sourceLabel
+                        : "Choose or drop a CSV file"}
+                  </strong>
                   <small>
                     {csv
                       ? `${csvFileName} · ${(csvFileSize / 1024).toFixed(1)} KB · ${csvRowCount} rows`
@@ -568,15 +667,10 @@ export function DiscoverPage() {
               {csv ? (
                 <Button
                   onClick={() => {
-                    setCsv("");
-                    setCsvFileName("");
-                    setCsvFileSize(0);
-                    setCsvHeaders([]);
-                    setCsvPreview([]);
-                    setCsvRowCount(0);
-                    setCsvMapping({});
-                    setImportResult(null);
-                    if (fileInput.current) fileInput.current.value = "";
+                    ++csvParseSequence.current;
+                    setCsvParsing(false);
+                    setCsvError("");
+                    clearCsvSelection();
                   }}
                   variant="ghost"
                 >
@@ -669,9 +763,9 @@ export function DiscoverPage() {
           {csvError ? <InlineNotice tone="danger">{csvError}</InlineNotice> : null}
           {importResult ? (
             <InlineNotice tone="success">
-              Imported {importResult.inserted} new and updated{" "}
-              {importResult.updated} companies; retained {importResult.contacts}{" "}
-              contacts and skipped {importResult.skipped} rows.
+              Import complete: {importResult.inserted} companies added,{" "}
+              {importResult.updated} updated, {importResult.contacts} contacts
+              retained, and {importResult.skipped} rows skipped.
             </InlineNotice>
           ) : null}
           {runMutation.error ? (
@@ -768,21 +862,25 @@ export function DiscoverPage() {
         ) : runs.isLoading ? (
           <Spinner label="Loading activity" />
         ) : runs.data?.length ? (
-          <div className="activity-table" role="table">
+          <div
+            aria-label="Recent research activity"
+            className="activity-table"
+            role="table"
+          >
             <div className="activity-table__header" role="row">
-              <span>Source</span>
-              <span>Status</span>
-              <span>Added</span>
-              <span>Updated</span>
-              <span>Finished</span>
+              <span role="columnheader">Source</span>
+              <span role="columnheader">Status</span>
+              <span role="columnheader">Added</span>
+              <span role="columnheader">Updated</span>
+              <span role="columnheader">Finished</span>
             </div>
             {runs.data.map((run) => (
               <div className="activity-table__row" key={run.id} role="row">
-                <span className="activity-source">
-                  <Globe2 size={15} />
+                <span className="activity-source" role="cell">
+                  <Globe2 aria-hidden="true" size={15} />
                   {run.sourceType}
                 </span>
-                <span>
+                <span role="cell">
                   <Badge
                     tone={
                       run.status === "completed"
@@ -798,9 +896,9 @@ export function DiscoverPage() {
                     <small className="row-error">{run.errorMessage}</small>
                   ) : null}
                 </span>
-                <span>{run.insertedCount}</span>
-                <span>{run.updatedCount}</span>
-                <span>{formatDate(run.finishedAt || run.createdAt)}</span>
+                <span role="cell">{run.insertedCount}</span>
+                <span role="cell">{run.updatedCount}</span>
+                <span role="cell">{formatDate(run.finishedAt || run.createdAt)}</span>
               </div>
             ))}
           </div>

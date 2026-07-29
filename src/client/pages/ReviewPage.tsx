@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useEffect,
   useMemo,
@@ -42,6 +43,7 @@ import {
   useParams,
   useSearchParams,
 } from "../lib/router";
+import { safeExternalHref } from "../lib/urls";
 import type {
   CompanyDetail,
   CompanyListItem,
@@ -122,13 +124,27 @@ function scoreLabel(score: number) {
 
 function SourceLinks({ company }: { company: CompanyDetail }) {
   const links = [
-    company.websiteUrl
-      ? { label: "Website", href: company.websiteUrl, icon: Globe2 }
+    safeExternalHref(company.websiteUrl)
+      ? {
+          label: "Website",
+          href: safeExternalHref(company.websiteUrl) as string,
+          icon: Globe2,
+        }
       : null,
-    company.linkedinUrl
-      ? { label: "LinkedIn", href: company.linkedinUrl, icon: UsersRound }
+    safeExternalHref(company.linkedinUrl)
+      ? {
+          label: "LinkedIn",
+          href: safeExternalHref(company.linkedinUrl) as string,
+          icon: UsersRound,
+        }
       : null,
-    company.ycUrl ? { label: "YC profile", href: company.ycUrl, icon: Sparkles } : null,
+    safeExternalHref(company.ycUrl)
+      ? {
+          label: "YC profile",
+          href: safeExternalHref(company.ycUrl) as string,
+          icon: Sparkles,
+        }
+      : null,
   ].filter(Boolean) as Array<{ label: string; href: string; icon: typeof Globe2 }>;
 
   if (!links.length) return <span className="muted-copy">No company links confirmed.</span>;
@@ -973,10 +989,10 @@ function ContactCard({
             </Badge>
           ) : null}
         </div>
-        {contact.linkedinUrl ? (
-          <a
-            className="contact-linkedin"
-            href={contact.linkedinUrl}
+          {safeExternalHref(contact.linkedinUrl) ? (
+            <a
+              className="contact-linkedin"
+              href={safeExternalHref(contact.linkedinUrl) as string}
             rel="noreferrer"
             target="_blank"
           >
@@ -1148,6 +1164,19 @@ function ManualJobDialog({
       onOpenChange(false);
     },
   });
+  useEffect(() => {
+    setTitle("");
+    setLocation("");
+    setDepartment("");
+    setUrl("");
+    setPostedAt("");
+    setObservedAt(localDateValue());
+    setExcerpt("");
+    setNoPublicUrl(false);
+    setConfirmedLive(false);
+    mutation.reset();
+  }, [company.id, open]);
+
   return (
     <Dialog
       description="Use a public source when possible. A manually confirmed role is retained as hiring evidence."
@@ -1301,6 +1330,12 @@ function ExcludeCompanyDialog({
       onOpenChange(false);
     },
   });
+  useEffect(() => {
+    setReason("not_hiring");
+    setNote("");
+    mutation.reset();
+  }, [company.id, open]);
+
   return (
     <Dialog
       description="The company remains in SQLite with evidence, people, jobs, and review history."
@@ -1526,6 +1561,15 @@ function ManualEvidenceDialog({
       onOpenChange(false);
     },
   });
+  useEffect(() => {
+    setEntityId(company.id);
+    setFieldName("general");
+    setValue("");
+    setSourceUrl("");
+    setExcerpt("");
+    setConfirmed(false);
+    mutation.reset();
+  }, [company.id, open]);
 
   return (
     <Dialog
@@ -1608,7 +1652,12 @@ function ManualEvidenceDialog({
         <div className="dialog-actions">
           <Button onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
-            disabled={mutation.isPending || !fieldName}
+            disabled={
+              mutation.isPending ||
+              !fieldName ||
+              !confirmed ||
+              !(value.trim() || excerpt.trim())
+            }
             type="submit"
             variant="primary"
           >
@@ -1642,8 +1691,12 @@ function EvidenceRow({ evidence }: { evidence: EvidenceItem }) {
         <div className="evidence-row__meta">
           <span>{evidence.sourceLabel}</span>
           <span>Captured {displayDate(evidence.capturedAt)}</span>
-          {evidence.sourceUrl ? (
-            <a href={evidence.sourceUrl} rel="noreferrer" target="_blank">
+          {safeExternalHref(evidence.sourceUrl) ? (
+            <a
+              href={safeExternalHref(evidence.sourceUrl) as string}
+              rel="noreferrer"
+              target="_blank"
+            >
               Open source <ArrowUpRight size={12} />
             </a>
           ) : null}
@@ -1670,13 +1723,14 @@ function ReviewDecisionBar({
   onComplete: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [notes, setNotes] = useState(company.notes || "");
+  const [notes, setNotes] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   useEffect(() => {
-    setNotes(company.notes || "");
+    setNotes("");
+    setExpanded(false);
     setConfirmed(false);
-  }, [company.id, company.notes]);
+  }, [company.id]);
   const mutation = useMutation({
     mutationFn: (decision: "approved" | "rejected" | "needs_research") =>
       api.review(company.id, { decision, notes: notes || undefined }),
@@ -1803,8 +1857,33 @@ function CompanyWorkspace({
   const [addingEvidence, setAddingEvidence] = useState(false);
   const [addingJob, setAddingJob] = useState(false);
   const [excludingCompany, setExcludingCompany] = useState(false);
+  const tabRefs = useRef<Partial<Record<WorkspaceTab, HTMLButtonElement | null>>>(
+    {},
+  );
 
   useEffect(() => setTab("overview"), [company.id]);
+
+  function handleTabKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    currentTab: WorkspaceTab,
+  ) {
+    const currentIndex = reviewTabs.findIndex(({ value }) => value === currentTab);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1) % reviewTabs.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (currentIndex - 1 + reviewTabs.length) % reviewTabs.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = reviewTabs.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextTab = reviewTabs[nextIndex].value;
+    setTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
+  }
 
   const invalidate = () =>
     Promise.all([
@@ -1912,24 +1991,42 @@ function CompanyWorkspace({
         ) : null}
       </header>
 
-      <nav className="workspace-tabs" aria-label="Company record sections">
+      <div
+        aria-label="Company record sections"
+        className="workspace-tabs"
+        role="tablist"
+      >
         {reviewTabs.map(({ value, label, icon: Icon }) => (
           <button
-            aria-current={tab === value ? "page" : undefined}
+            aria-controls="company-record-panel"
+            aria-selected={tab === value}
             className={tab === value ? "is-active" : ""}
+            id={`company-tab-${value}`}
             key={value}
             onClick={() => setTab(value)}
+            onKeyDown={(event) => handleTabKeyDown(event, value)}
+            ref={(element) => {
+              tabRefs.current[value] = element;
+            }}
+            role="tab"
+            tabIndex={tab === value ? 0 : -1}
             type="button"
           >
-            <Icon size={15} />
+            <Icon aria-hidden="true" size={15} />
             {label}
             {value === "people" ? <span>{company.contacts.length}</span> : null}
             {value === "evidence" ? <span>{company.evidence.length}</span> : null}
           </button>
         ))}
-      </nav>
+      </div>
 
-      <div className="workspace-scroll">
+      <div
+        aria-labelledby={`company-tab-${tab}`}
+        className="workspace-scroll"
+        id="company-record-panel"
+        role="tabpanel"
+        tabIndex={0}
+      >
         {tab === "overview" ? (
           <>
             <section className="signal-summary">
@@ -2079,10 +2176,10 @@ function CompanyWorkspace({
                           {job.active ? "Open" : "Inactive"}
                         </Badge>
                         <span>{displayDate(job.postedAt || job.firstSeenAt)}</span>
-                        {job.url ? (
+                        {safeExternalHref(job.url) ? (
                           <a
                             aria-label={`Open ${job.title}`}
-                            href={job.url}
+                            href={safeExternalHref(job.url) as string}
                             rel="noreferrer"
                             target="_blank"
                           >
@@ -2240,57 +2337,84 @@ export function ReviewPage() {
   const { companyId } = useParams();
   const navigate = useNavigate();
   const [urlParams, setUrlParams] = useSearchParams();
-  const initialView = urlParams.get("view");
-  const [search, setSearch] = useState(urlParams.get("q") || "");
-  const [view, setView] = useState<ReviewView>(
-    ["unreviewed", "all", "approved", "needs_research"].includes(
-      initialView || "",
-    )
-      ? (initialView as ReviewView)
-      : "unreviewed",
-  );
-  const [openRolesOnly, setOpenRolesOnly] = useState(
-    urlParams.get("hiring") !== "false",
-  );
-  const [needs, setNeeds] = useState(urlParams.get("needs") || "any");
-  const [priority, setPriority] = useState(
-    urlParams.get("priority") || "all",
-  );
-  const [sort, setSort] = useState(urlParams.get("sort") || "hiring");
-  const [page, setPage] = useState(
-    Math.max(0, Number(urlParams.get("page")) || 0),
-  );
+  const search = urlParams.get("q") || "";
+  const requestedView = urlParams.get("view");
+  const view: ReviewView = [
+    "unreviewed",
+    "all",
+    "approved",
+    "needs_research",
+  ].includes(requestedView || "")
+    ? (requestedView as ReviewView)
+    : "unreviewed";
+  const openRolesOnly = urlParams.get("hiring") !== "false";
+  const requestedNeeds = urlParams.get("needs");
+  const needs = [
+    "any",
+    "fresh_jobs",
+    "missing_decision_maker",
+    "missing_email",
+    "email_verification",
+    "conflicts",
+    "ready_final",
+  ].includes(requestedNeeds || "")
+    ? (requestedNeeds as string)
+    : "any";
+  const requestedPriority = urlParams.get("priority");
+  const priority = ["all", "high", "medium", "low"].includes(
+    requestedPriority || "",
+  )
+    ? (requestedPriority as string)
+    : "all";
+  const requestedSort = urlParams.get("sort");
+  const sort = ["hiring", "recent", "roles", "name", "oldest"].includes(
+    requestedSort || "",
+  )
+    ? (requestedSort as string)
+    : "hiring";
+  const requestedPage = Number(urlParams.get("page"));
+  const page =
+    Number.isInteger(requestedPage) && requestedPage >= 0 ? requestedPage : 0;
   const pageSize = 100;
-  const mountedFilters = useRef(false);
 
-  useEffect(() => {
-    if (!mountedFilters.current) {
-      mountedFilters.current = true;
-      return;
+  function commitQueueParams(next: URLSearchParams) {
+    const query = next.toString();
+    if (companyId) {
+      navigate(`/review${query ? `?${query}` : ""}`);
+    } else {
+      setUrlParams(next);
     }
-    setPage(0);
-  }, [needs, openRolesOnly, priority, search, sort, view]);
+  }
 
-  useEffect(() => {
-    const next = new URLSearchParams();
-    if (search.trim()) next.set("q", search.trim());
-    if (view !== "unreviewed") next.set("view", view);
-    if (!openRolesOnly) next.set("hiring", "false");
-    if (needs !== "any") next.set("needs", needs);
-    if (priority !== "all") next.set("priority", priority);
-    if (sort !== "hiring") next.set("sort", sort);
-    if (page > 0) next.set("page", String(page));
-    setUrlParams(next, { replace: true });
-  }, [
-    needs,
-    openRolesOnly,
-    page,
-    priority,
-    search,
-    setUrlParams,
-    sort,
-    view,
-  ]);
+  function updateQueueParam(
+    key: string,
+    value: string,
+    defaultValue: string,
+  ) {
+    const next = new URLSearchParams(urlParams);
+    if (value === defaultValue || !value) next.delete(key);
+    else next.set(key, value);
+    next.delete("page");
+    commitQueueParams(next);
+  }
+
+  const setSearch = (value: string) => updateQueueParam("q", value, "");
+  const setView = (value: ReviewView) =>
+    updateQueueParam("view", value, "unreviewed");
+  const setOpenRolesOnly = (value: boolean) =>
+    updateQueueParam("hiring", value ? "true" : "false", "true");
+  const setNeeds = (value: string) => updateQueueParam("needs", value, "any");
+  const setPriority = (value: string) =>
+    updateQueueParam("priority", value, "all");
+  const setSort = (value: string) =>
+    updateQueueParam("sort", value, "hiring");
+  const setPage = (action: number | ((current: number) => number)) => {
+    const nextPage = typeof action === "function" ? action(page) : action;
+    const next = new URLSearchParams(urlParams);
+    if (nextPage > 0) next.set("page", String(nextPage));
+    else next.delete("page");
+    commitQueueParams(next);
+  };
 
   const params = useMemo(() => {
     const value = new URLSearchParams({
@@ -2393,8 +2517,6 @@ export function ReviewPage() {
                 aria-label="Search companies"
                 onChange={(event) => {
                   setSearch(event.target.value);
-                  setPage(0);
-                  if (companyId) navigate("/review");
                 }}
                 placeholder="Search company or sector"
                 type="search"
@@ -2409,8 +2531,6 @@ export function ReviewPage() {
                   className="select select--compact"
                   onChange={(event) => {
                     setView(event.target.value as ReviewView);
-                    setPage(0);
-                    if (companyId) navigate("/review");
                   }}
                   value={view}
                 >
@@ -2425,8 +2545,6 @@ export function ReviewPage() {
                 label="Hiring only"
                 onCheckedChange={(checked) => {
                   setOpenRolesOnly(checked);
-                  setPage(0);
-                  if (companyId) navigate("/review");
                 }}
               />
             </div>
@@ -2487,13 +2605,7 @@ export function ReviewPage() {
             sort !== "hiring" ? (
               <Button
                 onClick={() => {
-                  setSearch("");
-                  setView("unreviewed");
-                  setOpenRolesOnly(true);
-                  setNeeds("any");
-                  setPriority("all");
-                  setSort("hiring");
-                  setPage(0);
+                  commitQueueParams(new URLSearchParams());
                 }}
                 variant="ghost"
               >
@@ -2572,7 +2684,6 @@ export function ReviewPage() {
                 disabled={page === 0}
                 onClick={() => {
                   setPage((current) => Math.max(0, current - 1));
-                  if (companyId) navigate("/review");
                 }}
                 variant="ghost"
               >
@@ -2589,7 +2700,6 @@ export function ReviewPage() {
                 disabled={(page + 1) * pageSize >= companies.data.meta.total}
                 onClick={() => {
                   setPage((current) => current + 1);
-                  if (companyId) navigate("/review");
                 }}
                 variant="ghost"
               >

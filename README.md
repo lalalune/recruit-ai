@@ -52,7 +52,7 @@ The production shape is a standalone local executable that binds to `127.0.0.1` 
 
 Requirements:
 
-- Bun 1.3 or newer
+- Bun 1.3.14 (pinned in `.bun-version`, `package.json`, and CI)
 - macOS, Windows, or Linux
 
 ```bash
@@ -87,16 +87,36 @@ Environment values override locally saved secrets. Never commit `.env` or files 
 |---|---|
 | `bun run dev` | Start the API and Vite development server |
 | `bun run start` | Start the Bun server directly |
+| `bun run version:check` | Verify the app, package, tag (when supplied), and Bun versions agree |
 | `bun run typecheck` | Run TypeScript checks |
 | `bun test` | Run the test suite |
+| `bun run test:coverage` | Run the test suite with coverage output |
+| `bun run test:e2e:install` | Install the pinned Chromium browser used by Playwright |
+| `bun run test:e2e` | Run the isolated Chromium end-to-end suite |
 | `bun run benchmark:10k` | Build a temporary 10,000-company fixture and verify queue/dashboard queries |
 | `bun run build` | Build the web UI |
-| `bun run check` | Typecheck, test, and build |
+| `bun run check` | Check synchronized versions, typecheck, test, and build |
 | `bun run build:binary` | Build an executable for the current platform |
 | `bun run build:binaries` | Cross-compile supported macOS, Windows, and Linux artifacts |
+| `bun run smoke:binary` | Copy the current-platform executable outside the checkout and smoke-test it in isolated data |
+| `bun run release:package` | Package an all-target build into versioned release archives with notices and checksums |
 
-Compiled artifacts are written to `dist-bin/`. Cross-compilation does not sign or notarize a binary. Public distribution should add macOS notarization, Windows code signing, checksums, and release provenance.
-The current cross-compile matrix is macOS arm64/x64, Windows x64, and Linux x64.
+### Binary releases
+
+Compiled artifacts are written to the ignored `dist-bin/` directory. The release matrix is macOS arm64, macOS x64, Windows x64, and glibc-based Linux x64. The tag workflow accepts only `v<version>` tags whose commit is on `main`, reruns the audit, coverage, build, benchmark, and Chromium end-to-end gates, and builds and smoke-tests each executable on a matching native GitHub-hosted runner. It then creates these versioned packages:
+
+- `recruit-ai-v<version>-macos-arm64.tar.gz`
+- `recruit-ai-v<version>-macos-x64.tar.gz`
+- `recruit-ai-v<version>-linux-x64.tar.gz`
+- `recruit-ai-v<version>-windows-x64.zip`
+
+The official tag workflow performs packaging on Ubuntu with `tar`, `zip`, and
+`unzip`; these tools are needed only when a maintainer packages every target
+locally, not when a user runs `build:binary` for the current platform.
+
+Each archive contains the executable, RecruitAI’s `LICENSE`, a platform README, and generated third-party notices. `manifest.json` records the binary and archive hashes; `SHA256SUMS` covers every downloadable archive and the manifest. On Linux, verify from the download directory with `sha256sum --check SHA256SUMS`; on macOS use `shasum -a 256 -c SHA256SUMS`. On Windows, compare `Get-FileHash -Algorithm SHA256 <archive>` with the corresponding `SHA256SUMS` line.
+
+The workflow creates or updates a **draft** GitHub release and refuses to overwrite an already published release. Current artifacts have no trusted Developer ID or Authenticode signature, macOS builds are not notarized, and release provenance/attestations are not yet generated. (A macOS executable may carry an ad hoc linker signature, which does not establish publisher identity.) Review the draft, checksums, native smoke results, archive contents, and platform signing status before manually publishing it. Do not disable Gatekeeper, SmartScreen, or other platform security to run an artifact you have not independently verified.
 
 ## Local data
 
@@ -111,7 +131,15 @@ data/
   snapshots/
 ```
 
-Everything except the directory README and `.gitkeep` is ignored by Git. The SQLite database contains company/contact data, evidence metadata, conflicts, reviews, drafts and outcomes, suppressions, audit history, API keys, and the Gmail refresh token. Public-page snapshots, provider evidence, and backups may contain personal information. Full backups also include locally saved provider credentials and the Gmail token because those live in SQLite; treat every backup as a secret-bearing sensitive file. Packaged binaries use the operating system’s per-user application-data directory instead of the source checkout.
+Everything except the directory README and `.gitkeep` is ignored by Git. The SQLite database contains company/contact data, evidence metadata, conflicts, reviews, drafts and outcomes, suppressions, audit history, API keys, and the Gmail refresh token. Public-page snapshots, provider evidence, and backups may contain personal information. Full backups also include locally saved provider credentials and the Gmail token because those live in SQLite; treat every backup as a secret-bearing sensitive file.
+
+Packaged binaries use the operating system’s per-user application-data directory instead of the installation directory:
+
+- macOS: `~/Library/Application Support/RecruitAI`
+- Windows: `%LOCALAPPDATA%\RecruitAI`, falling back to `%APPDATA%\RecruitAI`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/recruit-ai`
+
+`RECRUITAI_DATA_DIR` overrides these packaged defaults.
 
 On macOS and Linux, RecruitAI enforces owner-only permissions on the data, snapshot, and backup directories (`0700`) and on SQLite/snapshot/backup files it creates (`0600`). Windows relies on the current user’s application-data ACLs.
 

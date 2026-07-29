@@ -13,12 +13,15 @@ import {
   saveSetting,
 } from "./repository";
 import { getSecret, saveSecrets } from "./secrets";
+import { AppError, conflict, upstreamFailure } from "./errors";
+import { reserveMutableOperation } from "./operationState";
 
 const gmailSendScope = "https://www.googleapis.com/auth/gmail.send";
 
 interface OAuthPending {
   verifier: string;
   expiresAt: number;
+  revision: number;
 }
 
 interface GoogleTokenResponse {
@@ -32,6 +35,7 @@ interface GoogleTokenResponse {
 
 const pendingOAuth = new Map<string, OAuthPending>();
 let sendChain: Promise<unknown> = Promise.resolve();
+let oauthRevision = 0;
 
 function base64Url(value: Uint8Array | string) {
   return Buffer.from(value)
@@ -147,6 +151,9 @@ export function getGmailStatus() {
   if (!config.sendingEnabled) missingRequirements.push("sending enabled");
   if (counts.sentLastHour >= config.hourlyCap) missingRequirements.push("hourly cap reached");
   if (counts.sentToday >= config.dailyCap) missingRequirements.push("daily cap reached");
+  if (counts.unresolvedUnknown > 0) {
+    missingRequirements.push("unresolved Gmail delivery");
+  }
   const { hour, day } = currentZonedSchedule(config.timeZone);
   if (!config.sendingDays.includes(day)) {
     missingRequirements.push("outside configured sending days");
@@ -181,15 +188,20 @@ export function getGmailStatus() {
 export function createGmailAuthorizationUrl() {
   const clientId = getSecret("GOOGLE_CLIENT_ID");
   if (!clientId || !getSecret("GOOGLE_CLIENT_SECRET")) {
-    throw new Error("Add the Google OAuth client ID and client secret in Settings first.");
+    throw conflict(
+      "Add the Google OAuth client ID and client secret in Settings first.",
+      "gmail_not_configured",
+    );
   }
   const state = base64Url(randomBytes(24));
   const verifier = base64Url(randomBytes(48));
   const challenge = base64Url(createHash("sha256").update(verifier).digest());
+  oauthRevision += 1;
   pendingOAuth.clear();
   pendingOAuth.set(state, {
     verifier,
     expiresAt: Date.now() + 10 * 60 * 1_000,
+    revision: oauthRevision,
   });
   const query = new URLSearchParams({
     client_id: clientId,
@@ -206,15 +218,25 @@ export function createGmailAuthorizationUrl() {
 }
 
 async function requestTokens(input: URLSearchParams) {
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: input,
-    signal: AbortSignal.timeout(30_000),
-  });
-  const payload = (await response.json()) as GoogleTokenResponse;
+  let response: Response;
+  try {
+    response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: input,
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    throw upstreamFailure("Google OAuth could not be reached.");
+  }
+  let payload: GoogleTokenResponse;
+  try {
+    payload = (await response.json()) as GoogleTokenResponse;
+  } catch {
+    throw upstreamFailure("Google OAuth returned malformed token data.");
+  }
   if (!response.ok || !payload.access_token) {
-    throw new Error(
+    throw upstreamFailure(
       payload.error_description || payload.error || "Google did not issue an access token.",
     );
   }
@@ -225,11 +247,16 @@ export async function completeGmailAuthorization(code: string, state: string) {
   const pending = pendingOAuth.get(state);
   pendingOAuth.delete(state);
   if (!pending || pending.expiresAt < Date.now()) {
-    throw new Error("The Gmail connection request expired. Start it again from Settings.");
+    throw conflict(
+      "The Gmail connection request expired. Start it again from Settings.",
+      "oauth_state_expired",
+    );
   }
   const clientId = getSecret("GOOGLE_CLIENT_ID");
   const clientSecret = getSecret("GOOGLE_CLIENT_SECRET");
-  if (!clientId || !clientSecret) throw new Error("Google OAuth is not configured.");
+  if (!clientId || !clientSecret) {
+    throw conflict("Google OAuth is not configured.", "gmail_not_configured");
+  }
   const tokens = await requestTokens(
     new URLSearchParams({
       code,
@@ -240,9 +267,12 @@ export async function completeGmailAuthorization(code: string, state: string) {
       code_verifier: pending.verifier,
     }),
   );
-  const refreshToken = tokens.refresh_token || getSecret("GOOGLE_REFRESH_TOKEN");
+  const refreshToken = tokens.refresh_token;
   if (!refreshToken) {
-    throw new Error("Google did not return a refresh token. Reconnect and approve access.");
+    throw conflict(
+      "Google did not return a new refresh token. Reconnect and approve offline access before changing accounts.",
+      "missing_refresh_token",
+    );
   }
   const userInfoResponse = await fetch(
     "https://openidconnect.googleapis.com/v1/userinfo",
@@ -251,17 +281,37 @@ export async function completeGmailAuthorization(code: string, state: string) {
       signal: AbortSignal.timeout(20_000),
     },
   );
-  const userInfo = (await userInfoResponse.json()) as { email?: string };
+  let userInfo: { email?: string };
+  try {
+    userInfo = (await userInfoResponse.json()) as { email?: string };
+  } catch {
+    throw upstreamFailure("Google returned malformed account information.");
+  }
   if (!userInfoResponse.ok || !userInfo.email) {
-    throw new Error("Gmail connected, but the account email could not be confirmed.");
+    throw upstreamFailure(
+      "Gmail connected, but the account email could not be confirmed.",
+    );
+  }
+  if (
+    pending.revision !== oauthRevision ||
+    clientId !== getSecret("GOOGLE_CLIENT_ID") ||
+    clientSecret !== getSecret("GOOGLE_CLIENT_SECRET")
+  ) {
+    throw conflict(
+      "Gmail settings changed while authorization was in progress. Start the connection again.",
+      "oauth_configuration_changed",
+    );
   }
   saveSecrets({ GOOGLE_REFRESH_TOKEN: refreshToken });
   saveSetting("gmail_account_email", userInfo.email);
   saveSetting("gmail_test_passed_at", null);
+  oauthRevision += 1;
   return { connected: true, email: userInfo.email };
 }
 
 export function disconnectGmail() {
+  oauthRevision += 1;
+  pendingOAuth.clear();
   saveSecrets({ GOOGLE_REFRESH_TOKEN: null });
   saveSetting("gmail_account_email", null);
   saveSetting("gmail_sending_enabled", false);
@@ -274,7 +324,10 @@ async function accessTokenFromRefreshToken() {
   const clientSecret = getSecret("GOOGLE_CLIENT_SECRET");
   const refreshToken = getSecret("GOOGLE_REFRESH_TOKEN");
   if (!clientId || !clientSecret || !refreshToken) {
-    throw new Error("Connect Gmail in Settings before sending.");
+    throw conflict(
+      "Connect Gmail in Settings before sending.",
+      "gmail_not_connected",
+    );
   }
   return (
     await requestTokens(
@@ -286,6 +339,25 @@ async function accessTokenFromRefreshToken() {
       }),
     )
   ).access_token as string;
+}
+
+function gmailIdentityFingerprint() {
+  const config = sendConfiguration();
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        senderName: config.senderName,
+        organizationName: config.organizationName,
+        postalAddress: config.postalAddress,
+        optOutText: config.optOutText,
+        complianceConfirmed: config.complianceConfirmed,
+        accountEmail: config.accountEmail,
+        clientId: getSecret("GOOGLE_CLIENT_ID"),
+        clientSecret: getSecret("GOOGLE_CLIENT_SECRET"),
+        refreshToken: getSecret("GOOGLE_REFRESH_TOKEN"),
+      }),
+    )
+    .digest("hex");
 }
 
 function safeHeader(value: string) {
@@ -318,14 +390,20 @@ function messageRaw(
 
 export async function sendGmailTestMessage() {
   const config = sendConfiguration();
-  if (!config.accountEmail) throw new Error("Connect Gmail before sending a test.");
+  const identityFingerprint = gmailIdentityFingerprint();
+  if (!config.accountEmail) {
+    throw conflict("Connect Gmail before sending a test.", "gmail_not_connected");
+  }
   if (
     !config.senderName ||
     !config.postalAddress ||
     !config.optOutText ||
     !config.complianceConfirmed
   ) {
-    throw new Error("Complete and save sender identity before sending a test.");
+    throw conflict(
+      "Complete and save sender identity before sending a test.",
+      "sender_identity_incomplete",
+    );
   }
   const accessToken = await accessTokenFromRefreshToken();
   const body = [
@@ -362,16 +440,34 @@ export async function sendGmailTestMessage() {
       },
     );
   } catch {
-    throw new Error(
+    throw upstreamFailure(
       "The Gmail test result is unknown. Check Sent mail before trying again.",
+      "gmail_test_unknown",
     );
   }
-  const payload = (await response.json()) as {
+  let payload: {
     id?: string;
     error?: { message?: string };
   };
+  try {
+    payload = (await response.json()) as typeof payload;
+  } catch {
+    throw upstreamFailure(
+      "The Gmail test response was malformed. Check Sent mail before trying again.",
+      "gmail_test_unknown",
+    );
+  }
   if (!response.ok || !payload.id) {
-    throw new Error(payload.error?.message || "Gmail rejected the test message.");
+    throw upstreamFailure(
+      payload.error?.message || "Gmail rejected the test message.",
+      "gmail_test_rejected",
+    );
+  }
+  if (identityFingerprint !== gmailIdentityFingerprint()) {
+    throw conflict(
+      "Sender identity or Gmail credentials changed during the test. The test message was sent, but you must test the current configuration again.",
+      "gmail_test_configuration_changed",
+    );
   }
   saveSetting("gmail_test_passed_at", new Date().toISOString());
   saveSetting("gmail_test_message_id", payload.id);
@@ -383,7 +479,10 @@ export async function sendGmailTestMessage() {
   };
 }
 
-function assertDraftCanSend(draftId: string) {
+function assertDraftCanSend(
+  draftId: string,
+  expectedStatus: "approved" | "sending" = "approved",
+) {
   const status = getGmailStatus();
   if (!status.sendReady) {
     throw new Error(`Sending is locked: ${status.missingRequirements.join(", ")}.`);
@@ -391,7 +490,13 @@ function assertDraftCanSend(draftId: string) {
   const config = sendConfiguration();
   const draft = getDraft(draftId);
   if (!draft) throw new Error("Draft not found.");
-  if (draft.status !== "approved") throw new Error("Approve the final draft before sending.");
+  if (draft.status !== expectedStatus) {
+    throw new Error(
+      expectedStatus === "approved"
+        ? "Approve the final draft before sending."
+        : "This draft is no longer the active send attempt.",
+    );
+  }
   if (!draft.editedAt) {
     throw new Error("Edit the generated message before approving and sending it.");
   }
@@ -486,6 +591,7 @@ function assertDraftCanSend(draftId: string) {
   if (
     isSuppressed(contact.email, "email") ||
     (domain ? isSuppressed(domain, "domain") : false) ||
+    (company.domain ? isSuppressed(company.domain, "domain") : false) ||
     isSuppressed(contact.id, "person") ||
     isSuppressed(contact.fullName, "person") ||
     isSuppressed(company.id, "company") ||
@@ -530,23 +636,27 @@ function assertDraftCanSend(draftId: string) {
 }
 
 async function sendOneDraft(draftId: string) {
-  const { draft, contact } = assertDraftCanSend(draftId);
+  assertDraftCanSend(draftId);
   const claimed = claimDraftForSend(draftId);
   if (!claimed) throw new Error("This draft is already being processed or is no longer approved.");
-  const config = sendConfiguration();
-  const footer = [
-    config.senderName,
-    config.organizationName || null,
-    config.postalAddress,
-    config.optOutText,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  const completeBody = `${draft.body.trim()}\n\n—\n${footer}`;
   let requestStarted = false;
   let responseProvesNoAcceptance = false;
   try {
     const accessToken = await accessTokenFromRefreshToken();
+    // Token refresh is an await boundary. Re-read every mutable send gate so a
+    // suppression, contact edit, settings change, or company change made while
+    // it was in flight cannot be bypassed.
+    const { draft, contact } = assertDraftCanSend(draftId, "sending");
+    const config = sendConfiguration();
+    const footer = [
+      config.senderName,
+      config.organizationName || null,
+      config.postalAddress,
+      config.optOutText,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const completeBody = `${draft.body.trim()}\n\n—\n${footer}`;
     requestStarted = true;
     const response = await fetch(
       "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
@@ -592,7 +702,16 @@ async function sendOneDraft(draftId: string) {
 }
 
 export function sendApprovedDraft(draftId: string) {
-  const operation = sendChain.then(() => sendOneDraft(draftId));
+  const releaseOperation = reserveMutableOperation("send Gmail outreach");
+  const operation = sendChain
+    .then(() => sendOneDraft(draftId))
+    .catch((error) => {
+      if (error instanceof AppError) throw error;
+      const message =
+        error instanceof Error ? error.message : "The Gmail send failed.";
+      throw conflict(message, "send_blocked");
+    })
+    .finally(releaseOperation);
   sendChain = operation.then(
     () => undefined,
     () => undefined,

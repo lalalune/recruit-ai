@@ -6,7 +6,15 @@ import {
   upsertJob,
 } from "../repository";
 import { normalizeDomain } from "../database";
-import { cleanText, fetchWithTimeout, mapWithConcurrency, truncate } from "./http";
+import { z } from "zod";
+import { upstreamFailure } from "../errors";
+import {
+  cleanText,
+  fetchProviderResponse,
+  mapWithConcurrency,
+  readBoundedJson,
+  truncate,
+} from "./http";
 
 interface HnItem {
   id: number;
@@ -20,6 +28,21 @@ interface HnItem {
   deleted?: boolean;
 }
 
+const HnItemSchema = z
+  .object({
+    id: z.number().int().nonnegative(),
+    type: z.string().max(100).optional().default("unknown"),
+    title: z.string().max(2_000).optional(),
+    text: z.string().max(2_000_000).optional(),
+    by: z.string().max(500).optional(),
+    time: z.number().int().nonnegative().optional(),
+    kids: z.array(z.number().int().nonnegative()).max(5_000).optional(),
+    dead: z.boolean().optional(),
+    deleted: z.boolean().optional(),
+  })
+  .nullable();
+const HnIdListSchema = z.array(z.number().int().nonnegative()).max(2_000);
+
 function extractExternalUrl(html: string) {
   const $ = load(html);
   const hrefs = $("a[href]")
@@ -28,11 +51,15 @@ function extractExternalUrl(html: string) {
     .filter((href): href is string => Boolean(href));
   for (const href of hrefs) {
     try {
+      if (href.length > 2_048) continue;
       const url = new URL(href);
+      const isHost = (domain: string) =>
+        url.hostname === domain || url.hostname.endsWith(`.${domain}`);
       if (
-        !url.hostname.endsWith("ycombinator.com") &&
-        !url.hostname.endsWith("linkedin.com") &&
-        !url.hostname.endsWith("github.com")
+        ["http:", "https:"].includes(url.protocol) &&
+        !isHost("ycombinator.com") &&
+        !isHost("linkedin.com") &&
+        !isHost("github.com")
       ) {
         return url.toString();
       }
@@ -68,23 +95,51 @@ function parseComment(comment: HnItem) {
     companyName,
     externalUrl,
     domain,
-    role: likelyRole || "Hiring via Hacker News",
+    role: truncate(likelyRole || "Hiring via Hacker News", 500),
     text,
   };
 }
 
 async function getItem(id: number) {
-  const response = await fetchWithTimeout(
+  const response = await fetchProviderResponse(
+    "Hacker News",
     `https://hacker-news.firebaseio.com/v0/item/${id}.json`,
   );
-  return (await response.json()) as HnItem | null;
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw upstreamFailure(
+      `Hacker News rejected an item request (HTTP ${response.status}).`,
+      "hackernews_request_rejected",
+    );
+  }
+  return readBoundedJson(
+    response,
+    "Hacker News",
+    HnItemSchema,
+    2_500_000,
+  ) as Promise<HnItem | null>;
 }
 
 export async function discoverHackerNews(limit: number) {
-  const askResponse = await fetchWithTimeout(
+  const askResponse = await fetchProviderResponse(
+    "Hacker News",
     "https://hacker-news.firebaseio.com/v0/askstories.json",
   );
-  const askIds = ((await askResponse.json()) as number[]).slice(0, 500);
+  if (!askResponse.ok) {
+    await askResponse.body?.cancel().catch(() => undefined);
+    throw upstreamFailure(
+      `Hacker News rejected the story-list request (HTTP ${askResponse.status}).`,
+      "hackernews_request_rejected",
+    );
+  }
+  const askIds = (
+    await readBoundedJson(
+      askResponse,
+      "Hacker News",
+      HnIdListSchema,
+      100_000,
+    )
+  ).slice(0, 500);
   const askItems = await mapWithConcurrency(askIds, 12, (id) => getItem(id));
   const thread = askItems
     .filter(
@@ -93,7 +148,10 @@ export async function discoverHackerNews(limit: number) {
     )
     .sort((a, b) => (b.time || 0) - (a.time || 0))[0];
   if (!thread) {
-    throw new Error("Could not find a recent Hacker News Who Is Hiring thread.");
+    throw upstreamFailure(
+      "Could not find a recent Hacker News Who Is Hiring thread.",
+      "hackernews_thread_not_found",
+    );
   }
   const commentIds = (thread.kids || []).slice(0, 500);
   const comments = await mapWithConcurrency(commentIds, 16, (id) => getItem(id));

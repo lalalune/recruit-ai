@@ -8,9 +8,14 @@
   }
 
   html {
+    visibility: hidden;
     color-scheme: light;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
+  }
+
+  html[data-recruitai-top-level="true"] {
+    visibility: visible;
   }
 
   body {
@@ -64,7 +69,7 @@
     --surface-strong: oklch(0.925 0.014 275);
     --ink: oklch(0.235 0.025 274);
     --ink-muted: oklch(0.475 0.025 274);
-    --ink-faint: oklch(0.61 0.022 274);
+    --ink-faint: oklch(0.51 0.022 274);
     --border: oklch(0.875 0.016 275);
     --border-strong: oklch(0.77 0.025 275);
     --accent: oklch(0.5 0.16 280);
@@ -367,7 +372,13 @@
   }
 
   .checkbox-field.is-disabled {
-    opacity: 0.55;
+    color: var(--ink-muted);
+    cursor: not-allowed;
+  }
+
+  .checkbox-field.is-disabled .checkbox {
+    border-color: var(--border);
+    background: var(--surface-strong);
     cursor: not-allowed;
   }
 
@@ -768,6 +779,11 @@
     gap: 20px;
   }
 
+  .page > *,
+  .discover-layout > * {
+    min-width: 0;
+  }
+
   .page-header {
     display: flex;
     min-height: 64px;
@@ -806,6 +822,7 @@
   }
 
   .panel {
+    min-width: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--surface);
@@ -1030,6 +1047,12 @@
     border-color: var(--accent);
   }
 
+  .file-drop:disabled {
+    color: var(--ink-muted);
+    background: var(--surface-subtle);
+    cursor: progress;
+  }
+
   .file-drop > span {
     display: grid;
     gap: 2px;
@@ -1157,7 +1180,9 @@
 
   .activity-table {
     display: grid;
-    overflow: hidden;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
     border-radius: 0 0 var(--radius-lg) var(--radius-lg);
   }
 
@@ -2657,8 +2682,14 @@
 
   .gmail-status__main {
     display: flex;
+    min-width: 0;
     align-items: center;
     gap: 11px;
+  }
+
+  .gmail-status__main > div {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .gmail-usage {
@@ -3026,6 +3057,44 @@
     }
   }
 
+  @media (max-width: 900px) {
+    .settings-section {
+      grid-template-columns: 1fr;
+    }
+
+    .settings-section__heading {
+      padding: 15px;
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    }
+
+    .settings-section__body {
+      padding: 15px;
+    }
+
+    .settings-form-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .settings-form-grid > .field {
+      grid-column: 1;
+    }
+
+    .gmail-status,
+    .compliance-state {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .gmail-status > .button-group,
+    .settings-actions--spread {
+      width: 100%;
+      flex-wrap: wrap;
+      justify-content: flex-start;
+    }
+  }
+
   @media (max-width: 760px) {
     .readiness-strip {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3337,7 +3406,7 @@
 
     .draft-layout {
       display: block;
-      height: calc(100% - 78px);
+      height: auto;
       overflow: auto;
     }
 

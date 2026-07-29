@@ -10,10 +10,19 @@ cp .env.example .env
 bun run dev
 ```
 
-Before opening a pull request:
+Before opening a pull request, run the same local gates used by the release
+workflow. The browser installation is needed once per Playwright version:
 
 ```bash
+bun install --frozen-lockfile
+bun audit
 bun run check
+bun run test:coverage
+bun run benchmark:10k
+bun run test:e2e:install
+bun run test:e2e
+bun run build:binary
+bun run smoke:binary
 ```
 
 ## Pull requests
@@ -25,6 +34,31 @@ bun run check
 - Update `docs/UX_FLOW.md` when a control or state changes materially.
 - Include accessible labels, keyboard behavior, empty/loading/error states, and 200% zoom in UI work.
 - Preserve existing user data through an explicit migration; never drop or rewrite a table silently.
+
+## Maintainer release process
+
+Release tags are accepted only from commits already on `main`. Before tagging:
+
+1. update both `package.json` and `APP_VERSION` in `src/shared/version.ts`;
+2. use the Bun version pinned by `.bun-version`;
+3. run `bun run version:check` and the complete gate above from a clean checkout;
+4. confirm provider fixtures contain no live data or credentials; and
+5. create and push an annotated `v<version>` tag.
+
+The tag workflow independently repeats the audit, test, coverage, build,
+benchmark, browser, and version gates. It then builds and smoke-tests macOS
+arm64/x64, Windows x64, and Linux x64 on matching native runners, packages the
+tested executables, verifies the release checksums, and creates or updates an
+**unsigned draft** GitHub release.
+
+Review the workflow logs, every archive’s `README.txt`, `LICENSE`, and
+`THIRD_PARTY_NOTICES.txt`, `manifest.json`, and `SHA256SUMS` before publishing.
+The workflow refuses to replace a release that is already public. Do not
+publish an unsigned draft as a trusted desktop release: macOS signing and
+notarization, Windows code signing, and release provenance/attestation remain
+separate release gates. When those systems are added, sign/notarize before the
+archive-and-checksum stage, then smoke-test and verify those exact checksummed
+outputs without rebuilding them afterward.
 
 ## Data and fixture rules
 

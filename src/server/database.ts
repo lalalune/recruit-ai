@@ -1,5 +1,6 @@
 import { Database, constants } from "bun:sqlite";
 import { chmodSync, existsSync } from "node:fs";
+import { SCHEMA_VERSION } from "../shared/version";
 import { getDatabasePath } from "./paths";
 
 let singleton: Database | null = null;
@@ -282,31 +283,19 @@ export function getDatabase() {
   singleton = trackSqliteStatements(
     new Database(databasePath, { create: true }),
   );
+  try {
+    assertSupportedSchemaVersion(singleton);
+  } catch (error) {
+    closeDatabase();
+    throw error;
+  }
   // Bun currently keeps WAL files locked after Database.close() on native
   // Windows. The rollback journal avoids that runtime-specific lock and keeps
   // backup restore/delete operations reliable for this single-owner app.
   singleton.exec(
     `PRAGMA journal_mode = ${process.platform === "win32" ? "DELETE" : "WAL"}`,
   );
-  singleton.exec(schema);
-  const draftColumns = singleton
-    .query("PRAGMA table_info('outreach_drafts')")
-    .all() as Array<{ name: string }>;
-  if (!draftColumns.some((column) => column.name === "edited_at")) {
-    singleton.exec("ALTER TABLE outreach_drafts ADD COLUMN edited_at TEXT");
-  }
-  if (!draftColumns.some((column) => column.name === "outcome_at")) {
-    singleton.exec("ALTER TABLE outreach_drafts ADD COLUMN outcome_at TEXT");
-  }
-  if (!draftColumns.some((column) => column.name === "outcome_note")) {
-    singleton.exec("ALTER TABLE outreach_drafts ADD COLUMN outcome_note TEXT");
-  }
-  const sourceRunColumns = singleton
-    .query("PRAGMA table_info('source_runs')")
-    .all() as Array<{ name: string }>;
-  if (!sourceRunColumns.some((column) => column.name === "params_hash")) {
-    singleton.exec("ALTER TABLE source_runs ADD COLUMN params_hash TEXT");
-  }
+  initializeDatabaseSchema(singleton);
   singleton
     .query(
       `UPDATE source_runs
@@ -321,73 +310,41 @@ export function getDatabase() {
      ON source_runs(source_type, params_hash)
      WHERE params_hash IS NOT NULL AND status IN ('queued', 'running')`,
   );
-  const contactColumns = singleton
-    .query("PRAGMA table_info('contacts')")
-    .all() as Array<{ name: string }>;
-  if (!contactColumns.some((column) => column.name === "phone_confirmed")) {
-    singleton.exec(
-      "ALTER TABLE contacts ADD COLUMN phone_confirmed INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  if (!contactColumns.some((column) => column.name === "phone_source")) {
-    singleton.exec("ALTER TABLE contacts ADD COLUMN phone_source TEXT");
-  }
-  if (!contactColumns.some((column) => column.name === "fallback_reason")) {
-    singleton.exec("ALTER TABLE contacts ADD COLUMN fallback_reason TEXT");
-  }
-  if (!contactColumns.some((column) => column.name === "fallback_confirmed")) {
-    singleton.exec(
-      "ALTER TABLE contacts ADD COLUMN fallback_confirmed INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  if (!contactColumns.some((column) => column.name === "employment_confirmed")) {
-    singleton.exec(
-      "ALTER TABLE contacts ADD COLUMN employment_confirmed INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  if (!contactColumns.some((column) => column.name === "observed_title")) {
-    singleton.exec("ALTER TABLE contacts ADD COLUMN observed_title TEXT");
-  }
-  if (!contactColumns.some((column) => column.name === "employment_observed_at")) {
-    singleton.exec("ALTER TABLE contacts ADD COLUMN employment_observed_at TEXT");
-  }
-  const companyColumns = singleton
-    .query("PRAGMA table_info('companies')")
-    .all() as Array<{ name: string }>;
-  if (!companyColumns.some((column) => column.name === "fit_confirmed")) {
-    singleton.exec(
-      "ALTER TABLE companies ADD COLUMN fit_confirmed INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  if (!companyColumns.some((column) => column.name === "recruiting_fit")) {
-    singleton.exec(
-      "ALTER TABLE companies ADD COLUMN recruiting_fit TEXT NOT NULL DEFAULT 'unknown'",
-    );
-  }
-  if (!companyColumns.some((column) => column.name === "recruiting_fit_note")) {
-    singleton.exec("ALTER TABLE companies ADD COLUMN recruiting_fit_note TEXT");
-  }
-  if (!companyColumns.some((column) => column.name === "exclusion_reason")) {
-    singleton.exec("ALTER TABLE companies ADD COLUMN exclusion_reason TEXT");
-  }
-  if (!companyColumns.some((column) => column.name === "exclusion_note")) {
-    singleton.exec("ALTER TABLE companies ADD COLUMN exclusion_note TEXT");
-  }
-  if (!companyColumns.some((column) => column.name === "hiring_score_json")) {
-    singleton.exec(
-      "ALTER TABLE companies ADD COLUMN hiring_score_json TEXT NOT NULL DEFAULT '{}'",
-    );
-  }
-  const jobColumns = singleton
-    .query("PRAGMA table_info('jobs')")
-    .all() as Array<{ name: string }>;
-  if (!jobColumns.some((column) => column.name === "confirmed_live")) {
-    singleton.exec(
-      "ALTER TABLE jobs ADD COLUMN confirmed_live INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  if (!jobColumns.some((column) => column.name === "observed_at")) {
-    singleton.exec("ALTER TABLE jobs ADD COLUMN observed_at TEXT");
+  const interruptedDrafts = singleton
+    .query(
+      `SELECT id, company_id FROM outreach_drafts WHERE status = 'sending'`,
+    )
+    .all() as Array<{ id: string; company_id: string }>;
+  if (interruptedDrafts.length) {
+    const interruptedAt = nowIso();
+    singleton.transaction(() => {
+      singleton!
+        .query(
+          `UPDATE outreach_drafts
+           SET status = 'send_unknown', updated_at = ?
+           WHERE status = 'sending'`,
+        )
+        .run(interruptedAt);
+      for (const draft of interruptedDrafts) {
+        singleton!
+          .query(
+            `INSERT INTO audit_events (
+              id, event_type, entity_type, entity_id, summary, payload_json,
+              created_at
+            ) VALUES (?, 'outreach.send_unknown', 'company', ?, ?, ?, ?)`,
+          )
+          .run(
+            newId(),
+            draft.company_id,
+            "Recovered an interrupted Gmail send; delivery requires manual inspection",
+            JSON.stringify({
+              draftId: draft.id,
+              reason: "Application stopped while the Gmail request was in progress.",
+            }),
+            interruptedAt,
+          );
+      }
+    })();
   }
   if (process.platform !== "win32") {
     for (const filePath of [
@@ -399,6 +356,223 @@ export function getDatabase() {
     }
   }
   return singleton;
+}
+
+function tableExists(database: Database, tableName: string) {
+  return Boolean(
+    database
+      .query(
+        `SELECT 1 AS found FROM sqlite_master
+         WHERE type = 'table' AND name = ? LIMIT 1`,
+      )
+      .get(tableName),
+  );
+}
+
+export function readSchemaVersion(database: Database) {
+  if (!tableExists(database, "schema_migrations")) return 0;
+  const row = database
+    .query("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
+    .get() as { version: number };
+  const version = Number(row.version);
+  if (!Number.isSafeInteger(version) || version < 0) {
+    throw new Error("The RecruitAI schema version record is invalid.");
+  }
+  return version;
+}
+
+export function assertSupportedSchemaVersion(database: Database) {
+  const foundVersion = readSchemaVersion(database);
+  if (foundVersion > SCHEMA_VERSION) {
+    throw new Error(
+      `This data was created by schema version ${foundVersion}, but this app supports up to ${SCHEMA_VERSION}. Upgrade RecruitAI before opening it.`,
+    );
+  }
+  return foundVersion;
+}
+
+function columnNames(database: Database, tableName: string) {
+  return database
+    .query(`PRAGMA table_info('${tableName}')`)
+    .all() as Array<{ name: string }>;
+}
+
+function addColumnUnlessPresent(
+  database: Database,
+  tableName: string,
+  columnName: string,
+  definition: string,
+) {
+  if (!columnNames(database, tableName).some((column) => column.name === columnName)) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
+  }
+}
+
+function canonicalizeSuppressions(database: Database) {
+  const rows = database
+    .query("SELECT id, value, kind FROM suppression_entries ORDER BY created_at ASC")
+    .all() as Array<{ id: string; value: string; kind: string }>;
+  database.transaction(() => {
+    for (const row of rows) {
+      const canonical =
+        row.kind === "email"
+          ? normalizeEmailAddress(row.value)
+          : row.kind === "domain"
+            ? normalizeDomain(row.value)
+            : row.value.trim();
+      if (!canonical || canonical === row.value) continue;
+      const duplicate = database
+        .query(
+          `SELECT id FROM suppression_entries
+           WHERE value = ? AND kind = ? AND id != ? LIMIT 1`,
+        )
+        .get(canonical, row.kind, row.id) as { id: string } | null;
+      if (duplicate) {
+        database.query("DELETE FROM suppression_entries WHERE id = ?").run(row.id);
+      } else {
+        database
+          .query("UPDATE suppression_entries SET value = ? WHERE id = ?")
+          .run(canonical, row.id);
+      }
+    }
+  })();
+}
+
+function enforceSinglePrimaryContact(database: Database) {
+  const duplicatePrimaries = database
+    .query(
+      `SELECT id, company_id FROM contacts
+       WHERE status = 'primary'
+       ORDER BY company_id, rank ASC, created_at ASC, id ASC`,
+    )
+    .all() as Array<{ id: string; company_id: string }>;
+  const retainedCompanies = new Set<string>();
+  database.transaction(() => {
+    for (const contact of duplicatePrimaries) {
+      if (!retainedCompanies.has(contact.company_id)) {
+        retainedCompanies.add(contact.company_id);
+        continue;
+      }
+      database
+        .query(
+          `UPDATE contacts SET status = 'alternate', reviewed = 0, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(nowIso(), contact.id);
+    }
+  })();
+  database.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS contacts_one_primary_per_company
+     ON contacts(company_id) WHERE status = 'primary'`,
+  );
+}
+
+export function initializeDatabaseSchema(database: Database) {
+  const recordedSchemaVersion = assertSupportedSchemaVersion(database);
+  database.exec(schema);
+  if (recordedSchemaVersion < 1) {
+    database.transaction(() => {
+      addColumnUnlessPresent(database, "outreach_drafts", "edited_at", "edited_at TEXT");
+      addColumnUnlessPresent(database, "outreach_drafts", "outcome_at", "outcome_at TEXT");
+      addColumnUnlessPresent(database, "outreach_drafts", "outcome_note", "outcome_note TEXT");
+      addColumnUnlessPresent(database, "source_runs", "params_hash", "params_hash TEXT");
+      addColumnUnlessPresent(
+        database,
+        "contacts",
+        "phone_confirmed",
+        "phone_confirmed INTEGER NOT NULL DEFAULT 0",
+      );
+      addColumnUnlessPresent(database, "contacts", "phone_source", "phone_source TEXT");
+      addColumnUnlessPresent(database, "contacts", "fallback_reason", "fallback_reason TEXT");
+      addColumnUnlessPresent(
+        database,
+        "contacts",
+        "fallback_confirmed",
+        "fallback_confirmed INTEGER NOT NULL DEFAULT 0",
+      );
+      addColumnUnlessPresent(
+        database,
+        "contacts",
+        "employment_confirmed",
+        "employment_confirmed INTEGER NOT NULL DEFAULT 0",
+      );
+      addColumnUnlessPresent(database, "contacts", "observed_title", "observed_title TEXT");
+      addColumnUnlessPresent(
+        database,
+        "contacts",
+        "employment_observed_at",
+        "employment_observed_at TEXT",
+      );
+      addColumnUnlessPresent(
+        database,
+        "companies",
+        "fit_confirmed",
+        "fit_confirmed INTEGER NOT NULL DEFAULT 0",
+      );
+      addColumnUnlessPresent(
+        database,
+        "companies",
+        "recruiting_fit",
+        "recruiting_fit TEXT NOT NULL DEFAULT 'unknown'",
+      );
+      addColumnUnlessPresent(
+        database,
+        "companies",
+        "recruiting_fit_note",
+        "recruiting_fit_note TEXT",
+      );
+      addColumnUnlessPresent(
+        database,
+        "companies",
+        "exclusion_reason",
+        "exclusion_reason TEXT",
+      );
+      addColumnUnlessPresent(
+        database,
+        "companies",
+        "exclusion_note",
+        "exclusion_note TEXT",
+      );
+      addColumnUnlessPresent(
+        database,
+        "companies",
+        "hiring_score_json",
+        "hiring_score_json TEXT NOT NULL DEFAULT '{}'",
+      );
+      addColumnUnlessPresent(
+        database,
+        "jobs",
+        "confirmed_live",
+        "confirmed_live INTEGER NOT NULL DEFAULT 0",
+      );
+      addColumnUnlessPresent(database, "jobs", "observed_at", "observed_at TEXT");
+      database
+        .query(
+          `INSERT INTO schema_migrations (version, applied_at)
+           VALUES (1, ?)`,
+        )
+        .run(nowIso());
+    })();
+  }
+  canonicalizeSuppressions(database);
+  enforceSinglePrimaryContact(database);
+  database.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS source_runs_active_unique
+     ON source_runs(source_type, params_hash)
+     WHERE params_hash IS NOT NULL AND status IN ('queued', 'running')`,
+  );
+}
+
+export function migrateDatabaseFile(filePath: string) {
+  const database = trackSqliteStatements(
+    new Database(filePath, { readwrite: true, create: false }),
+  );
+  try {
+    initializeDatabaseSchema(database);
+    database.exec("PRAGMA optimize");
+  } finally {
+    closeSqliteDatabase(database);
+  }
 }
 
 export function closeDatabase() {
@@ -451,10 +625,10 @@ export function newId() {
 export function normalizeName(value: string) {
   return value
     .toLowerCase()
-    .normalize("NFKD")
+    .normalize("NFKC")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\b(inc|llc|ltd|corp|corporation|company|co)\b\.?/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
     .trim();
 }
 
@@ -466,13 +640,68 @@ export function normalizeDomain(value?: string | null) {
     const url = candidate.includes("://")
       ? new URL(candidate)
       : new URL(`https://${candidate}`);
-    return url.hostname.replace(/^www\./, "");
-  } catch {
-    return candidate
-      .replace(/^https?:\/\//, "")
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password
+    ) {
+      return null;
+    }
+    const hostname = url.hostname
       .replace(/^www\./, "")
-      .split("/")[0] || null;
+      .replace(/\.$/, "")
+      .toLowerCase();
+    const labels = hostname.split(".");
+    if (
+      hostname.length > 253 ||
+      labels.length < 2 ||
+      /^\d+(?:\.\d+){3}$/.test(hostname) ||
+      labels.some(
+        (label) =>
+          label.length < 1 ||
+          label.length > 63 ||
+          !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+      ) ||
+      /^\d+$/.test(labels.at(-1) || "")
+    ) {
+      return null;
+    }
+    return hostname;
+  } catch {
+    return null;
   }
+}
+
+export function normalizeHttpUrl(value?: string | null) {
+  const candidate = value?.trim();
+  if (!candidate || candidate.length > 2_048) return null;
+  try {
+    const url = new URL(candidate);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password
+    ) {
+      return null;
+    }
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeEmailAddress(value?: string | null) {
+  const candidate = value?.trim().toLowerCase();
+  if (
+    !candidate ||
+    candidate.length > 320 ||
+    !/^[^\s@"(),:;<>\\[\]]+@[^\s@"(),:;<>\\[\]]+\.[^\s@"(),:;<>\\[\]]+$/.test(
+      candidate,
+    )
+  ) {
+    return null;
+  }
+  return candidate;
 }
 
 export function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {

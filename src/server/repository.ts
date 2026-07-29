@@ -12,15 +12,19 @@ import type {
   ReadinessItem,
   SourceRunItem,
 } from "../shared/types";
+import { CompanyPatchSchema, ContactPatchSchema } from "../shared/types";
 import { createHash } from "node:crypto";
 import {
   getDatabase,
   newId,
   normalizeDomain,
+  normalizeEmailAddress,
+  normalizeHttpUrl,
   normalizeName,
   nowIso,
   safeJsonParse,
 } from "./database";
+import { badRequest, conflict as conflictError, notFound } from "./errors";
 
 type SqlValue = string | number | boolean | null;
 
@@ -75,6 +79,29 @@ interface JobInput {
   observedAt?: string | null;
 }
 
+const CompanyInputSchema = CompanyPatchSchema.pick({
+  name: true,
+  domain: true,
+  websiteUrl: true,
+  linkedinUrl: true,
+  ycUrl: true,
+  description: true,
+  location: true,
+  employeeCountMin: true,
+  employeeCountMax: true,
+  industries: true,
+  stage: true,
+  status: true,
+  priority: true,
+})
+  .extend({
+    name: CompanyPatchSchema.shape.name.unwrap(),
+  })
+  .strict();
+const ContactInputSchema = ContactPatchSchema.extend({
+  fullName: ContactPatchSchema.shape.fullName.unwrap(),
+});
+
 function assertObservationDate(
   value: unknown,
   label: string,
@@ -83,16 +110,16 @@ function assertObservationDate(
   const timestamp = Date.parse(String(value || ""));
   const age = Date.now() - timestamp;
   if (!Number.isFinite(timestamp)) {
-    throw new Error(`${label} must be a valid date.`);
+    throw badRequest(`${label} must be a valid date.`);
   }
   if (age < -24 * 60 * 60 * 1_000) {
-    throw new Error(`${label} cannot be in the future.`);
+    throw badRequest(`${label} cannot be in the future.`);
   }
   if (
     maximumAgeDays !== undefined &&
     age > maximumAgeDays * 24 * 60 * 60 * 1_000
   ) {
-    throw new Error(
+    throw badRequest(
       `${label} must be within the ${maximumAgeDays}-day hiring window.`,
     );
   }
@@ -197,6 +224,38 @@ export function addAudit(
   summary: string,
   payload?: unknown,
 ) {
+  const normalizedEventType = eventType.trim().slice(0, 100);
+  const normalizedEntityType = entityType.trim().slice(0, 100);
+  const normalizedEntityId = entityId.trim().slice(0, 500);
+  const normalizedSummary = summary.trim().slice(0, 2_000);
+  if (
+    !normalizedEventType ||
+    !normalizedEntityType ||
+    !normalizedEntityId ||
+    !normalizedSummary
+  ) {
+    throw badRequest("Audit events require a type, entity, and summary.");
+  }
+  let payloadJson: string | null = null;
+  if (payload !== undefined) {
+    try {
+      const serialized = JSON.stringify(payload);
+      const bytes = Buffer.byteLength(serialized, "utf8");
+      payloadJson =
+        bytes <= 100 * 1024
+          ? serialized
+          : JSON.stringify({
+              truncated: true,
+              originalBytes: bytes,
+              sha256: createHash("sha256").update(serialized).digest("hex"),
+            });
+    } catch {
+      payloadJson = JSON.stringify({
+        truncated: true,
+        reason: "Audit payload was not serializable.",
+      });
+    }
+  }
   getDatabase()
     .query(
       `INSERT INTO audit_events
@@ -205,24 +264,46 @@ export function addAudit(
     )
     .run(
       newId(),
-      eventType,
-      entityType,
-      entityId,
-      summary,
-      payload === undefined ? null : JSON.stringify(payload),
+      normalizedEventType,
+      normalizedEntityType,
+      normalizedEntityId,
+      normalizedSummary,
+      payloadJson,
       nowIso(),
     );
 }
 
 export function upsertCompany(input: CompanyInput) {
+  const parsedInput = CompanyInputSchema.safeParse(input);
+  if (!parsedInput.success) {
+    throw badRequest(
+      parsedInput.error.issues[0]?.message || "Company data is invalid.",
+    );
+  }
+  if (
+    parsedInput.data.employeeCountMin !== null &&
+    parsedInput.data.employeeCountMin !== undefined &&
+    parsedInput.data.employeeCountMax !== null &&
+    parsedInput.data.employeeCountMax !== undefined &&
+    parsedInput.data.employeeCountMin > parsedInput.data.employeeCountMax
+  ) {
+    throw badRequest("Minimum employees cannot exceed maximum employees.");
+  }
+  input = parsedInput.data;
   const db = getDatabase();
   const normalized = normalizeName(input.name);
   const domain = normalizeDomain(input.domain || input.websiteUrl);
+  const websiteUrl = normalizeHttpUrl(input.websiteUrl);
+  const linkedinUrl = normalizeHttpUrl(input.linkedinUrl);
+  const ycUrl = normalizeHttpUrl(input.ycUrl);
+  const incomingLocation = input.location?.trim().toLowerCase() || "";
   let existing = domain
     ? db
         .query("SELECT * FROM companies WHERE domain = ? LIMIT 1")
         .get(domain) as Record<string, unknown> | null
     : null;
+  let matchedByAlias = false;
+  let hasCurrentNameMatch = false;
   if (!existing) {
     const nameMatches = db
       .query(
@@ -233,7 +314,7 @@ export function upsertCompany(input: CompanyInput) {
          LIMIT 20`,
       )
       .all(normalized) as Record<string, unknown>[];
-    const incomingLocation = input.location?.trim().toLowerCase() || "";
+    hasCurrentNameMatch = nameMatches.length > 0;
     const compatibleMatches = nameMatches.filter((row) => {
       const existingLocation = String(row.location || "").trim().toLowerCase();
       return incomingLocation
@@ -250,64 +331,218 @@ export function upsertCompany(input: CompanyInput) {
       existing = domainlessMatches.length === 1 ? domainlessMatches[0] : null;
     }
   }
+  if (!existing && !domain && !hasCurrentNameMatch) {
+    const compatibleAliasMatches = db
+      .query(
+        `SELECT c.* FROM company_aliases a
+         JOIN companies c ON c.id = a.company_id
+         WHERE a.normalized_alias = ?
+           AND (
+             ? = ''
+             OR COALESCE(trim(c.location), '') = ''
+             OR lower(trim(c.location)) = ?
+           )
+         ORDER BY c.updated_at DESC
+         LIMIT 2`,
+      )
+      .all(
+        normalized,
+        incomingLocation,
+        incomingLocation,
+      ) as Record<string, unknown>[];
+    if (compatibleAliasMatches.length === 1) {
+      existing = compatibleAliasMatches[0];
+      matchedByAlias = true;
+    }
+  }
 
   const timestamp = nowIso();
   if (existing) {
     const id = String(existing.id);
     const previousName = String(existing.name);
-    const mergedIndustries = Array.from(
-      new Set([
-        ...safeJsonParse<string[]>(existing.industries_json as string, []),
-        ...(input.industries ?? []),
-      ]),
+    const displayName =
+      matchedByAlias || Boolean(existing.reviewed)
+        ? previousName
+        : input.name.length > previousName.length
+          ? input.name
+          : previousName;
+    const displayNormalized = normalizeName(displayName);
+    const wasReviewed = Boolean(existing.reviewed);
+    const existingIndustries = safeJsonParse<string[]>(
+      existing.industries_json as string,
+      [],
     );
-    db.query(
-      `UPDATE companies SET
-        name = CASE WHEN length(?) > length(name) THEN ? ELSE name END,
-        normalized_name = ?,
-        domain = COALESCE(domain, ?),
-        website_url = COALESCE(website_url, ?),
-        linkedin_url = COALESCE(linkedin_url, ?),
-        yc_url = COALESCE(yc_url, ?),
-        description = CASE
-          WHEN description IS NULL OR length(?) > length(description) THEN ?
-          ELSE description END,
-        location = COALESCE(location, ?),
-        employee_count_min = COALESCE(?, employee_count_min),
-        employee_count_max = COALESCE(?, employee_count_max),
-        industries_json = ?,
-        stage = COALESCE(?, stage),
-        status = CASE WHEN status = 'new' THEN COALESCE(?, status) ELSE status END,
-        priority = COALESCE(?, priority),
-        updated_at = ?
-       WHERE id = ?`,
-    ).run(
-      input.name,
-      input.name,
-      normalized,
-      domain,
-      input.websiteUrl ?? (domain ? `https://${domain}` : null),
-      input.linkedinUrl ?? null,
-      input.ycUrl ?? null,
-      input.description ?? "",
-      input.description ?? null,
-      input.location ?? null,
-      input.employeeCountMin ?? null,
-      input.employeeCountMax ?? null,
-      JSON.stringify(mergedIndustries),
-      input.stage ?? null,
-      input.status ?? "needs_research",
-      input.priority ?? null,
-      timestamp,
-      id,
-    );
+    const mergedIndustries =
+      wasReviewed && existingIndustries.length
+        ? existingIndustries
+        : Array.from(
+            new Set([...existingIndustries, ...(input.industries ?? [])]),
+          );
+    const existingHasEmployeeRange =
+      existing.employee_count_min !== null ||
+      existing.employee_count_max !== null;
+    const preserveReviewedEmployeeRange =
+      wasReviewed && existingHasEmployeeRange;
+    const incomingHasEmployeeRange =
+      (input.employeeCountMin !== null &&
+        input.employeeCountMin !== undefined) ||
+      (input.employeeCountMax !== null &&
+        input.employeeCountMax !== undefined);
+    const descriptionCandidate =
+      wasReviewed && String(existing.description || "").trim()
+        ? null
+        : input.description ?? null;
+    const refreshConflicts: Array<{
+      fieldName: string;
+      currentValue: string;
+      candidateValue: string;
+    }> = [];
+    if (
+      wasReviewed &&
+      !matchedByAlias &&
+      normalizeName(previousName) !== normalizeName(input.name)
+    ) {
+      refreshConflicts.push({
+        fieldName: "name",
+        currentValue: previousName,
+        candidateValue: input.name,
+      });
+    }
+    const existingLocation = String(existing.location || "").trim();
+    if (
+      wasReviewed &&
+      existingLocation &&
+      input.location &&
+      normalizedFact(existingLocation) !== normalizedFact(input.location)
+    ) {
+      refreshConflicts.push({
+        fieldName: "location",
+        currentValue: existingLocation,
+        candidateValue: input.location,
+      });
+    }
+    if (preserveReviewedEmployeeRange && incomingHasEmployeeRange) {
+      const currentValue = `${existing.employee_count_min ?? "?"}–${
+        existing.employee_count_max ?? "?"
+      }`;
+      const candidateValue = `${input.employeeCountMin ?? "?"}–${
+        input.employeeCountMax ?? "?"
+      }`;
+      if (currentValue !== candidateValue) {
+        refreshConflicts.push({
+          fieldName: "employee_count",
+          currentValue,
+          candidateValue,
+        });
+      }
+    }
+    const existingStage = String(existing.stage || "").trim();
+    if (
+      wasReviewed &&
+      existingStage &&
+      input.stage &&
+      normalizedFact(existingStage) !== normalizedFact(input.stage)
+    ) {
+      refreshConflicts.push({
+        fieldName: "stage",
+        currentValue: existingStage,
+        candidateValue: input.stage,
+      });
+    }
+    const materialBefore = JSON.stringify({
+      name: existing.name,
+      domain: existing.domain,
+      websiteUrl: existing.website_url,
+      location: existing.location,
+      employeeCountMin: existing.employee_count_min,
+      employeeCountMax: existing.employee_count_max,
+      industries: safeJsonParse(existing.industries_json as string, []),
+      stage: existing.stage,
+    });
+    let materialChanged = false;
+    db.transaction(() => {
+      db.query(
+        `UPDATE companies SET
+          name = ?,
+          normalized_name = ?,
+          domain = COALESCE(domain, ?),
+          website_url = COALESCE(website_url, ?),
+          linkedin_url = COALESCE(linkedin_url, ?),
+          yc_url = COALESCE(yc_url, ?),
+          description = CASE
+            WHEN description IS NULL OR length(?) > length(description) THEN ?
+            ELSE description END,
+          location = COALESCE(location, ?),
+          employee_count_min = COALESCE(?, employee_count_min),
+          employee_count_max = COALESCE(?, employee_count_max),
+          industries_json = ?,
+          stage = COALESCE(?, stage),
+          status = CASE WHEN status = 'new' THEN COALESCE(?, status) ELSE status END,
+          priority = COALESCE(?, priority),
+          updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        displayName,
+        displayNormalized,
+        domain,
+        websiteUrl ?? (domain ? `https://${domain}` : null),
+        linkedinUrl,
+        ycUrl,
+        descriptionCandidate ?? "",
+        descriptionCandidate,
+        input.location ?? null,
+        preserveReviewedEmployeeRange
+          ? null
+          : input.employeeCountMin ?? null,
+        preserveReviewedEmployeeRange
+          ? null
+          : input.employeeCountMax ?? null,
+        JSON.stringify(mergedIndustries),
+        wasReviewed && existingStage ? null : input.stage ?? null,
+        input.status ?? null,
+        wasReviewed ? null : input.priority ?? null,
+        timestamp,
+        id,
+      );
+      const after = db
+        .query(
+          `SELECT name, domain, website_url, location, employee_count_min,
+             employee_count_max, industries_json, stage
+           FROM companies WHERE id = ?`,
+        )
+        .get(id) as Record<string, unknown>;
+      const materialAfter = JSON.stringify({
+        name: after.name,
+        domain: after.domain,
+        websiteUrl: after.website_url,
+        location: after.location,
+        employeeCountMin: after.employee_count_min,
+        employeeCountMax: after.employee_count_max,
+        industries: safeJsonParse(after.industries_json as string, []),
+        stage: after.stage,
+      });
+      materialChanged = materialBefore !== materialAfter;
+    })();
     syncCompanySearch(id);
     if (normalizeName(previousName) !== normalizeName(input.name)) {
       saveCompanyAlias(id, previousName, "historical");
       saveCompanyAlias(id, input.name, "upsert");
       refreshNameConflicts(normalizeName(previousName));
     }
-    refreshNameConflicts(normalized);
+    refreshNameConflicts(displayNormalized);
+    if (refreshConflicts.length) {
+      registerCompanyRefreshConflicts(id, refreshConflicts);
+    }
+    if (materialChanged) {
+      reopenCompanyReview(id, "Material provider data changed.");
+      addAudit(
+        "company.material_refresh",
+        "company",
+        id,
+        "Material provider changes reopened company review",
+        { changedAt: timestamp },
+      );
+    }
     return { id, inserted: false };
   }
 
@@ -323,9 +558,9 @@ export function upsertCompany(input: CompanyInput) {
     input.name,
     normalized,
     domain,
-    input.websiteUrl ?? (domain ? `https://${domain}` : null),
-    input.linkedinUrl ?? null,
-    input.ycUrl ?? null,
+    websiteUrl ?? (domain ? `https://${domain}` : null),
+    linkedinUrl,
+    ycUrl,
     input.description ?? null,
     input.location ?? null,
     input.employeeCountMin ?? null,
@@ -349,10 +584,11 @@ function saveCompanyAlias(
   companyId: string,
   alias: string,
   sourceType: string,
+  database = getDatabase(),
 ) {
   const normalizedAlias = normalizeName(alias);
   if (!normalizedAlias) return;
-  getDatabase()
+  database
     .query(
       `INSERT INTO company_aliases
        (id, company_id, alias, normalized_alias, source_type)
@@ -362,6 +598,54 @@ function saveCompanyAlias(
          source_type = excluded.source_type`,
     )
     .run(newId(), companyId, alias.trim(), normalizedAlias, sourceType);
+}
+
+function registerCompanyRefreshConflicts(
+  companyId: string,
+  candidates: Array<{
+    fieldName: string;
+    currentValue: string;
+    candidateValue: string;
+  }>,
+) {
+  const database = getDatabase();
+  const timestamp = nowIso();
+  database.transaction(() => {
+    for (const candidate of candidates) {
+      database
+        .query(
+          `INSERT INTO conflicts (
+            id, company_id, entity_type, entity_id, field_name, current_value,
+            candidate_value, status, created_at
+          ) VALUES (?, ?, 'company', ?, ?, ?, ?, 'open', ?)
+          ON CONFLICT(company_id, entity_type, entity_id, field_name, candidate_value)
+          WHERE status IN ('open', 'researching')
+          DO UPDATE SET current_value = excluded.current_value,
+            status = 'open'`,
+        )
+        .run(
+          newId(),
+          companyId,
+          companyId,
+          candidate.fieldName,
+          candidate.currentValue,
+          candidate.candidateValue,
+          timestamp,
+        );
+    }
+  })();
+  recomputeConflictCount(companyId);
+  reopenCompanyReview(
+    companyId,
+    "Provider facts conflict with reviewed company data.",
+  );
+  addAudit(
+    "company.provider_conflict",
+    "company",
+    companyId,
+    "Provider facts were retained as conflicts without replacing reviewed data",
+    { candidates },
+  );
 }
 
 function refreshNameConflicts(normalizedName: string) {
@@ -409,7 +693,9 @@ function refreshNameConflicts(normalizedName: string) {
       .query(
         `SELECT id FROM conflicts
          WHERE company_id = ? AND field_name = 'identity'
-           AND candidate_value = ? LIMIT 1`,
+           AND candidate_value = ?
+           AND status IN ('open', 'researching')
+         LIMIT 1`,
       )
       .get(row.id, candidate) as { id: string } | null;
     if (!existing) {
@@ -455,6 +741,59 @@ function syncCompanySearch(companyId: string) {
 }
 
 export function addEvidence(input: EvidenceInput) {
+  const bounded = (value: string | null | undefined, maximum: number) => {
+    const normalized = value?.trim();
+    return normalized ? normalized.slice(0, maximum) : null;
+  };
+  const fieldName = bounded(input.fieldName, 200);
+  const sourceType = bounded(input.sourceType, 100);
+  const sourceLabel = bounded(input.sourceLabel, 500);
+  if (!fieldName || !sourceType || !sourceLabel) {
+    throw badRequest(
+      "Evidence requires a field name, source type, and source label.",
+    );
+  }
+  const normalizedInput: EvidenceInput = {
+    ...input,
+    fieldName,
+    sourceType,
+    sourceLabel,
+    value: bounded(input.value, 5_000),
+    sourceUrl: normalizeHttpUrl(input.sourceUrl),
+    excerpt: bounded(input.excerpt, 5_000),
+    screenshotPath: bounded(input.screenshotPath, 4_096),
+    confidence:
+      Number.isFinite(input.confidence)
+        ? Math.min(1, Math.max(0, Number(input.confidence)))
+        : 0.6,
+  };
+  let payloadJson: string | null = null;
+  if (input.payload !== undefined) {
+    try {
+      const serialized = JSON.stringify(input.payload);
+      const payloadBytes = Buffer.byteLength(serialized, "utf8");
+      payloadJson =
+        payloadBytes <= 100 * 1024
+          ? serialized
+          : JSON.stringify({
+              truncated: true,
+              originalBytes: payloadBytes,
+              sha256: createHash("sha256").update(serialized).digest("hex"),
+            });
+    } catch {
+      payloadJson = JSON.stringify({
+        truncated: true,
+        reason: "Evidence payload was not serializable.",
+      });
+    }
+  }
+  const companyId = evidenceCompanyId(
+    normalizedInput.entityType,
+    normalizedInput.entityId,
+  );
+  if (!companyId) {
+    throw notFound("The selected evidence entity no longer exists.");
+  }
   const id = newId();
   const database = getDatabase();
   database
@@ -467,22 +806,21 @@ export function addEvidence(input: EvidenceInput) {
     )
     .run(
       id,
-      input.entityType,
-      input.entityId,
-      input.fieldName,
-      input.value ?? null,
-      input.sourceType,
-      input.sourceLabel,
-      input.sourceUrl ?? null,
-      input.excerpt ?? null,
-      input.screenshotPath ?? null,
-      input.confidence ?? 0.6,
+      normalizedInput.entityType,
+      normalizedInput.entityId,
+      normalizedInput.fieldName,
+      normalizedInput.value ?? null,
+      normalizedInput.sourceType,
+      normalizedInput.sourceLabel,
+      normalizedInput.sourceUrl ?? null,
+      normalizedInput.excerpt ?? null,
+      normalizedInput.screenshotPath ?? null,
+      normalizedInput.confidence ?? 0.6,
       nowIso(),
-      input.payload === undefined ? null : JSON.stringify(input.payload),
+      payloadJson,
     );
-  registerEvidenceConflict(id, input);
-  const companyId = evidenceCompanyId(input.entityType, input.entityId);
-  if (companyId) recomputeCompanyStats(companyId);
+  registerEvidenceConflict(id, normalizedInput);
+  recomputeCompanyStats(companyId);
   return id;
 }
 
@@ -490,7 +828,12 @@ function evidenceCompanyId(
   entityType: EvidenceInput["entityType"],
   entityId: string,
 ) {
-  if (entityType === "company") return entityId;
+  if (entityType === "company") {
+    const row = getDatabase()
+      .query("SELECT id FROM companies WHERE id = ?")
+      .get(entityId) as { id: string } | null;
+    return row?.id ?? null;
+  }
   const table = entityType === "contact" ? "contacts" : "jobs";
   const row = getDatabase()
     .query(`SELECT company_id FROM ${table} WHERE id = ?`)
@@ -629,14 +972,45 @@ export function getEvidence(evidenceId: string): EvidenceItem | null {
 export function upsertJob(input: JobInput) {
   const db = getDatabase();
   const timestamp = nowIso();
-  const externalId = input.externalId || input.url || `${input.title}:${input.location || ""}`;
+  const title = input.title.trim();
+  if (!title || title.length > 500) {
+    throw badRequest("A job title must contain 1–500 characters.");
+  }
+  const sourceType = input.sourceType.trim();
+  if (!sourceType || sourceType.length > 100) {
+    throw badRequest("A job source type must contain 1–100 characters.");
+  }
+  const boundedText = (value: string | null | undefined, maximum: number) => {
+    const normalized = value?.trim();
+    return normalized ? normalized.slice(0, maximum) : null;
+  };
+  const location = boundedText(input.location, 500);
+  const department = boundedText(input.department, 500);
+  const descriptionExcerpt = boundedText(input.descriptionExcerpt, 5_000);
+  const normalizedUrl = normalizeHttpUrl(input.url);
+  const postedAt =
+    input.postedAt && Number.isFinite(Date.parse(input.postedAt))
+      ? input.postedAt.trim().slice(0, 100)
+      : null;
+  const observedAt =
+    input.observedAt && Number.isFinite(Date.parse(input.observedAt))
+      ? input.observedAt.trim().slice(0, 100)
+      : null;
+  const rawExternalId =
+    input.externalId?.trim() ||
+    normalizedUrl ||
+    `${title}:${location || ""}`;
+  const externalId =
+    rawExternalId.length <= 2_000
+      ? rawExternalId
+      : `sha256:${createHash("sha256").update(rawExternalId).digest("hex")}`;
   const existing = db
     .query(
       `SELECT id, title, location, department, url, posted_at, active,
         confirmed_live, observed_at FROM jobs
        WHERE company_id = ? AND source_type = ? AND external_id = ?`,
     )
-    .get(input.companyId, input.sourceType, externalId) as {
+    .get(input.companyId, sourceType, externalId) as {
       id: string;
       title: string;
       location: string | null;
@@ -646,36 +1020,39 @@ export function upsertJob(input: JobInput) {
       active: number;
       confirmed_live: number;
       observed_at: string | null;
-    } | null;
+  } | null;
   if (existing) {
+    const effectiveLocation = location ?? existing.location;
+    const effectiveDepartment = department ?? existing.department;
+    const effectiveUrl = normalizedUrl ?? existing.url;
     const materialChanged =
-      existing.title !== input.title ||
-      existing.location !== (input.location ?? null) ||
-      existing.department !== (input.department ?? null) ||
-      existing.url !== (input.url ?? null) ||
-      (input.postedAt !== undefined &&
-        input.postedAt !== null &&
-        existing.posted_at !== input.postedAt) ||
+      existing.title !== title ||
+      existing.location !== effectiveLocation ||
+      existing.department !== effectiveDepartment ||
+      existing.url !== effectiveUrl ||
+      (postedAt !== null && existing.posted_at !== postedAt) ||
       (input.confirmedLive !== undefined &&
         existing.confirmed_live !== (input.confirmedLive ? 1 : 0)) ||
       existing.active !== 1;
     db.query(
       `UPDATE jobs SET
-        title = ?, location = ?, department = ?, description_excerpt = ?,
-        url = ?, posted_at = COALESCE(?, posted_at), last_seen_at = ?,
+        title = ?, location = COALESCE(?, location),
+        department = COALESCE(?, department),
+        description_excerpt = COALESCE(?, description_excerpt),
+        url = COALESCE(?, url), posted_at = COALESCE(?, posted_at), last_seen_at = ?,
         active = 1, confirmed_live = COALESCE(?, confirmed_live),
         observed_at = COALESCE(?, observed_at)
        WHERE id = ?`,
     ).run(
-      input.title,
-      input.location ?? null,
-      input.department ?? null,
-      input.descriptionExcerpt ?? null,
-      input.url ?? null,
-      input.postedAt ?? null,
+      title,
+      location,
+      department,
+      descriptionExcerpt,
+      normalizedUrl,
+      postedAt,
       timestamp,
       input.confirmedLive === undefined ? null : input.confirmedLive ? 1 : 0,
-      input.observedAt ?? null,
+      observedAt,
       existing.id,
     );
     recomputeCompanyStats(input.companyId);
@@ -695,21 +1072,39 @@ export function upsertJob(input: JobInput) {
     id,
     input.companyId,
     externalId,
-    input.title,
-    input.location ?? null,
-    input.department ?? null,
-    input.descriptionExcerpt ?? null,
-    input.url ?? null,
-    input.sourceType,
-    input.postedAt ?? null,
+    title,
+    location,
+    department,
+    descriptionExcerpt,
+    normalizedUrl,
+    sourceType,
+    postedAt,
     timestamp,
     timestamp,
     input.confirmedLive ? 1 : 0,
-    input.observedAt ?? timestamp,
+    observedAt ?? timestamp,
   );
   recomputeCompanyStats(input.companyId);
   reopenCompanyReview(input.companyId, "New hiring evidence added.");
   return { id, inserted: true };
+}
+
+function invalidateApprovedDrafts(companyId: string, reason: string) {
+  const invalidatedDrafts = getDatabase()
+    .query(
+      `UPDATE outreach_drafts SET status = 'draft', updated_at = ?
+       WHERE company_id = ? AND status = 'approved'`,
+    )
+    .run(nowIso(), companyId).changes;
+  if (invalidatedDrafts) {
+    addAudit(
+      "outreach.approval_invalidated",
+      "company",
+      companyId,
+      "Material record changes require the outreach message to be reviewed again",
+      { reason, drafts: invalidatedDrafts },
+    );
+  }
 }
 
 function reopenCompanyReview(companyId: string, reason: string) {
@@ -721,6 +1116,7 @@ function reopenCompanyReview(companyId: string, reason: string) {
        WHERE id = ? AND reviewed = 1`,
     )
     .run(nowIso(), companyId);
+  invalidateApprovedDrafts(companyId, reason);
   if (result.changes) {
     addAudit("company.review_reopened", "company", companyId, reason);
   }
@@ -1318,7 +1714,11 @@ function buildCompanyReadiness(company: CompanyDetail): ReadinessItem[] {
     Math.max(30, Number(settings.maxEvidenceAgeDays) || 180),
   );
   const latestCompanyEvidence = company.evidence
-    .filter((item) => item.entityType === "company")
+    .filter(
+      (item) =>
+        item.entityType === "company" &&
+        (item.sourceType !== "manual" || item.confidence >= 0.9),
+    )
     .reduce((latest, item) => {
       const timestamp = Date.parse(item.capturedAt);
       return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
@@ -1343,11 +1743,12 @@ function buildCompanyReadiness(company: CompanyDetail): ReadinessItem[] {
       : "review";
   const catchAllExcluded =
     primary?.emailStatus === "accept_all" && catchAllPolicy === "exclude";
-  const domain = primary?.email?.split("@")[1] || company.domain;
+  const contactDomain = primary?.email?.split("@")[1] || null;
   const suppressed =
     isSuppressed(company.id, "company") ||
     isSuppressed(company.name, "company") ||
-    Boolean(domain && isSuppressed(domain, "domain")) ||
+    Boolean(company.domain && isSuppressed(company.domain, "domain")) ||
+    Boolean(contactDomain && isSuppressed(contactDomain, "domain")) ||
     Boolean(
       primary &&
         (isSuppressed(primary.id, "person") ||
@@ -1466,12 +1867,56 @@ function buildCompanyReadiness(company: CompanyDetail): ReadinessItem[] {
 }
 
 export function patchCompany(companyId: string, patch: Record<string, unknown>) {
-  const previous = getDatabase()
-    .query("SELECT normalized_name, domain FROM companies WHERE id = ?")
+  const {
+    lastResearchedAt,
+    ...publicPatch
+  } = patch;
+  const parsedPatch = CompanyPatchSchema.safeParse(publicPatch);
+  if (!parsedPatch.success) {
+    throw badRequest(
+      parsedPatch.error.issues[0]?.message || "Company update is invalid.",
+    );
+  }
+  if (
+    lastResearchedAt !== undefined &&
+    lastResearchedAt !== null &&
+    (typeof lastResearchedAt !== "string" ||
+      lastResearchedAt.length > 100 ||
+      !Number.isFinite(Date.parse(lastResearchedAt)))
+  ) {
+    throw badRequest("Last-researched time must be a valid date.");
+  }
+  patch = {
+    ...parsedPatch.data,
+    ...(lastResearchedAt !== undefined ? { lastResearchedAt } : {}),
+  };
+  const database = getDatabase();
+  const previous = database
+    .query(
+      `SELECT name, normalized_name, domain, employee_count_min, employee_count_max
+       FROM companies WHERE id = ?`,
+    )
     .get(companyId) as {
+      name: string;
       normalized_name: string;
       domain: string | null;
+      employee_count_min: number | null;
+      employee_count_max: number | null;
     } | null;
+  if (!previous) return null;
+  const effectiveMinimum = Object.hasOwn(patch, "employeeCountMin")
+    ? (patch.employeeCountMin as number | null)
+    : previous.employee_count_min;
+  const effectiveMaximum = Object.hasOwn(patch, "employeeCountMax")
+    ? (patch.employeeCountMax as number | null)
+    : previous.employee_count_max;
+  if (
+    effectiveMinimum !== null &&
+    effectiveMaximum !== null &&
+    effectiveMinimum > effectiveMaximum
+  ) {
+    throw badRequest("Minimum employees cannot exceed maximum employees.");
+  }
   const fieldMap: Record<string, string> = {
     name: "name",
     domain: "domain",
@@ -1506,6 +1951,9 @@ export function patchCompany(companyId: string, patch: Record<string, unknown>) 
       params.push(value ? 1 : 0);
     }
     else if (key === "domain") params.push(normalizeDomain(value as string | null));
+    else if (["websiteUrl", "linkedinUrl", "ycUrl"].includes(key)) {
+      params.push(normalizeHttpUrl(value as string | null));
+    }
     else params.push(value as SqlValue);
   }
   const materialCompanyFields = [
@@ -1520,8 +1968,11 @@ export function patchCompany(companyId: string, patch: Record<string, unknown>) 
     "recruitingFit",
     "exclusionReason",
   ];
+  const hasMaterialCompanyChange = materialCompanyFields.some((key) =>
+    Object.hasOwn(patch, key),
+  );
   if (
-    materialCompanyFields.some((key) => Object.hasOwn(patch, key)) &&
+    hasMaterialCompanyChange &&
     patch.reviewed === undefined
   ) {
     assignments.push("reviewed = 0");
@@ -1537,24 +1988,39 @@ export function patchCompany(companyId: string, patch: Record<string, unknown>) 
     params.push(normalizeName(String(patch.name)));
   }
   assignments.push("updated_at = ?");
-  params.push(nowIso(), companyId);
-  getDatabase()
-    .query(`UPDATE companies SET ${assignments.join(", ")} WHERE id = ?`)
-    .run(...params);
+  const timestamp = nowIso();
+  params.push(timestamp, companyId);
+  const renamed =
+    typeof patch.name === "string" && patch.name !== previous.name;
+  database.transaction(() => {
+    const result = database
+      .query(`UPDATE companies SET ${assignments.join(", ")} WHERE id = ?`)
+      .run(...params);
+    if (result.changes !== 1) {
+      throw conflictError("The company changed before it could be updated.");
+    }
+    if (renamed) {
+      saveCompanyAlias(companyId, previous.name, "historical", database);
+      saveCompanyAlias(companyId, String(patch.name), "manual", database);
+    }
+  })();
+  if (hasMaterialCompanyChange) {
+    invalidateApprovedDrafts(companyId, "Material company data changed.");
+  }
   if (
     Object.hasOwn(patch, "domain") &&
     normalizeDomain(patch.domain as string | null) !== previous?.domain
   ) {
-    getDatabase()
+    database
       .query(
         `UPDATE contacts SET reviewed = 0, updated_at = ?
          WHERE company_id = ?`,
       )
-      .run(nowIso(), companyId);
+      .run(timestamp, companyId);
   }
   syncCompanySearch(companyId);
   if (previous) refreshNameConflicts(previous.normalized_name);
-  const updated = getDatabase()
+  const updated = database
     .query("SELECT normalized_name FROM companies WHERE id = ?")
     .get(companyId) as { normalized_name: string } | null;
   if (updated && updated.normalized_name !== previous?.normalized_name) {
@@ -1611,10 +2077,10 @@ export function addManualJob(
   },
 ) {
   if (!input.confirmedLive) {
-    throw new Error("Confirm that the role or hiring evidence is currently live.");
+    throw badRequest("Confirm that the role or hiring evidence is currently live.");
   }
   if (!input.url && !input.noPublicUrl) {
-    throw new Error("Add a public URL or confirm that no public URL is available.");
+    throw badRequest("Add a public URL or confirm that no public URL is available.");
   }
   const hiringWindowDays = Math.min(
     180,
@@ -1667,20 +2133,188 @@ export function addManualJob(
   return getCompany(companyId);
 }
 
+interface EmployeeRangeCandidate {
+  employeeCountMin: number | null;
+  employeeCountMax: number | null;
+}
+
+function validateEmployeeRangeCandidate(
+  employeeCountMin: number | null,
+  employeeCountMax: number | null,
+): EmployeeRangeCandidate {
+  if (employeeCountMin === null && employeeCountMax === null) {
+    throw badRequest("The candidate employee range could not be parsed.");
+  }
+  for (const value of [employeeCountMin, employeeCountMax]) {
+    if (
+      value !== null &&
+      (!Number.isSafeInteger(value) || value < 0 || value > 10_000_000)
+    ) {
+      throw badRequest("The candidate employee range could not be parsed.");
+    }
+  }
+  if (
+    employeeCountMin !== null &&
+    employeeCountMax !== null &&
+    employeeCountMin > employeeCountMax
+  ) {
+    throw badRequest("The candidate employee range is inverted.");
+  }
+  return { employeeCountMin, employeeCountMax };
+}
+
+function parseEmployeeBound(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (!normalized || normalized === "?") return null;
+    if (!/^\d[\d,]*$/.test(normalized)) {
+      throw badRequest("The candidate employee range could not be parsed.");
+    }
+    return Number(normalized.replaceAll(",", ""));
+  }
+  if (typeof value !== "number") {
+    throw badRequest("The candidate employee range could not be parsed.");
+  }
+  return value;
+}
+
+function parseEmployeeRangeText(value: string | null): EmployeeRangeCandidate {
+  const normalized = String(value || "").trim();
+  const range = normalized.match(
+    /^(?:employees?\s*[:=]?\s*)?(\?|[\d,]+)\s*(?:[–—-]|to)\s*(\?|[\d,]+)(?:\s+employees?)?$/i,
+  );
+  if (range) {
+    return validateEmployeeRangeCandidate(
+      parseEmployeeBound(range[1]),
+      parseEmployeeBound(range[2]),
+    );
+  }
+  const values = normalized
+    .match(/\d[\d,]*/g)
+    ?.map((item) => parseEmployeeBound(item));
+  if (!values?.length || values.length > 2 || values.includes(null)) {
+    throw badRequest("The candidate employee range could not be parsed.");
+  }
+  return validateEmployeeRangeCandidate(
+    values[0]!,
+    values.length === 1 ? values[0]! : values[1]!,
+  );
+}
+
+function structuredEmployeeRange(
+  payload: unknown,
+): EmployeeRangeCandidate | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const root = payload as Record<string, unknown>;
+  const candidates: Array<{
+    value: Record<string, unknown>;
+    allowGenericBounds: boolean;
+  }> = [{ value: root, allowGenericBounds: true }];
+  for (const key of [
+    "employeeRange",
+    "employee_range",
+    "employeeCountRange",
+    "employee_count_range",
+    "employeeCount",
+    "employee_count",
+    "company",
+    "organization",
+    "row",
+    "data",
+  ]) {
+    const nested = root[key];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      candidates.push({
+        value: nested as Record<string, unknown>,
+        allowGenericBounds:
+          key === "employeeRange" ||
+          key === "employee_range" ||
+          key === "employeeCountRange" ||
+          key === "employee_count_range" ||
+          key === "employeeCount" ||
+          key === "employee_count",
+      });
+    }
+  }
+  for (const candidate of candidates) {
+    const minimumKeys = [
+      "employeeCountMin",
+      "employee_count_min",
+      "employeesMin",
+      "employees_min",
+      ...(candidate.allowGenericBounds ? ["minimum", "min"] : []),
+    ];
+    const maximumKeys = [
+      "employeeCountMax",
+      "employee_count_max",
+      "employeesMax",
+      "employees_max",
+      ...(candidate.allowGenericBounds ? ["maximum", "max"] : []),
+    ];
+    const minimumKey = minimumKeys.find((key) =>
+      Object.hasOwn(candidate.value, key),
+    );
+    const maximumKey = maximumKeys.find((key) =>
+      Object.hasOwn(candidate.value, key),
+    );
+    if (minimumKey || maximumKey) {
+      return validateEmployeeRangeCandidate(
+        minimumKey ? parseEmployeeBound(candidate.value[minimumKey]) : null,
+        maximumKey ? parseEmployeeBound(candidate.value[maximumKey]) : null,
+      );
+    }
+  }
+  for (const candidate of candidates) {
+    const exactKey = [
+      "employeeCount",
+      "employee_count",
+      "employees",
+      "estimated_num_employees",
+    ].find((key) => Object.hasOwn(candidate.value, key));
+    if (exactKey) {
+      const exactValue = candidate.value[exactKey];
+      if (
+        exactValue &&
+        typeof exactValue === "object" &&
+        !Array.isArray(exactValue)
+      ) {
+        continue;
+      }
+      if (
+        typeof exactValue === "string" &&
+        /(?:[–—-]|\bto\b)/i.test(exactValue)
+      ) {
+        return parseEmployeeRangeText(exactValue);
+      }
+      const exact = parseEmployeeBound(exactValue);
+      return validateEmployeeRangeCandidate(exact, exact);
+    }
+  }
+  return null;
+}
+
 export function resolveConflict(
   conflictId: string,
   resolution: "use_candidate" | "keep_current" | "research_further",
   note: string,
 ) {
   const normalizedNote = note.trim();
-  if (!normalizedNote) throw new Error("A resolution note is required.");
+  if (!normalizedNote) throw badRequest("A resolution note is required.");
   const database = getDatabase();
   const conflict = database
-    .query("SELECT * FROM conflicts WHERE id = ?")
+    .query(
+      `SELECT conflicts.*, evidence.payload_json AS evidence_payload_json
+       FROM conflicts
+       LEFT JOIN evidence ON evidence.id = conflicts.evidence_id
+       WHERE conflicts.id = ?`,
+    )
     .get(conflictId) as Record<string, unknown> | null;
-  if (!conflict) throw new Error("Conflict not found.");
+  if (!conflict) throw notFound("Conflict not found.");
   if (conflict.status === "resolved") {
-    throw new Error("This conflict was already resolved.");
+    throw conflictError("This conflict was already resolved.");
   }
   const companyId = String(conflict.company_id);
   if (resolution === "use_candidate") {
@@ -1688,25 +2322,31 @@ export function resolveConflict(
     const field = String(conflict.field_name);
     if (conflict.entity_type === "company") {
       if (field === "employee_count") {
-        const values = String(value || "")
-          .match(/\d[\d,]*/g)
-          ?.map((item) => Number(item.replaceAll(",", "")));
-        if (!values?.length) {
-          throw new Error("The candidate employee range could not be parsed.");
-        }
+        const range =
+          structuredEmployeeRange(
+            safeJsonParse<unknown>(
+              conflict.evidence_payload_json as string | null,
+              null,
+            ),
+          ) ?? parseEmployeeRangeText(value);
         patchCompany(companyId, {
-          employeeCountMin: Math.min(...values),
-          employeeCountMax: Math.max(...values),
+          employeeCountMin: range.employeeCountMin,
+          employeeCountMax: range.employeeCountMax,
           reviewed: false,
         });
       } else if (field === "industries") {
-        patchCompany(companyId, {
-          industries: String(value || "")
-            .split(/[,;|]/)
-            .map((item) => item.trim())
-            .filter(Boolean),
+        const industries = String(value || "")
+          .split(/[,;|]/)
+          .map((item) => item.trim())
+          .filter(Boolean);
+        const parsed = CompanyPatchSchema.safeParse({
+          industries,
           reviewed: false,
         });
+        if (!parsed.success || !industries.length) {
+          throw badRequest("The candidate industries are invalid or too large.");
+        }
+        patchCompany(companyId, parsed.data);
       } else {
         const fieldMap: Record<string, string> = {
           name: "name",
@@ -1715,22 +2355,57 @@ export function resolveConflict(
           stage: "stage",
         };
         const patchField = fieldMap[field];
-        if (!patchField) throw new Error("This conflict cannot be applied automatically.");
-        patchCompany(companyId, { [patchField]: value, reviewed: false });
+        if (!patchField) {
+          throw badRequest("This conflict cannot be applied automatically.");
+        }
+        if (
+          value === null ||
+          (patchField === "domain" && !normalizeDomain(value))
+        ) {
+          throw badRequest(`The candidate ${field} value is invalid.`);
+        }
+        const parsed = CompanyPatchSchema.safeParse({
+          [patchField]: value,
+          reviewed: false,
+        });
+        if (!parsed.success) {
+          throw badRequest(`The candidate ${field} value is invalid.`);
+        }
+        patchCompany(companyId, parsed.data);
       }
     } else if (conflict.entity_type === "contact") {
       const contactId = String(conflict.entity_id);
       if (field === "phone") {
-        patchContact(contactId, {
+        const parsed = ContactPatchSchema.safeParse({
           phone: value,
           phoneConfirmed: true,
           phoneSource: `Conflict resolution: ${normalizedNote}`,
           reviewed: false,
         });
+        if (!parsed.success || !String(value || "").trim()) {
+          throw badRequest("The candidate phone value is invalid.");
+        }
+        patchContact(contactId, {
+          ...parsed.data,
+        });
       } else if (field === "email" || field === "title") {
-        patchContact(contactId, { [field]: value, reviewed: false });
+        if (
+          value === null ||
+          (field === "email" && !normalizeEmailAddress(value)) ||
+          (field === "title" && !String(value).trim())
+        ) {
+          throw badRequest(`The candidate ${field} value is invalid.`);
+        }
+        const parsed = ContactPatchSchema.safeParse({
+          [field]: value,
+          reviewed: false,
+        });
+        if (!parsed.success) {
+          throw badRequest(`The candidate ${field} value is invalid.`);
+        }
+        patchContact(contactId, parsed.data);
       } else {
-        throw new Error("This conflict cannot be applied automatically.");
+        throw badRequest("This conflict cannot be applied automatically.");
       }
     }
   }
@@ -1786,23 +2461,47 @@ export function deactivateMissingJobs(
       )
       .run(companyId, sourceType).changes;
   } else {
-    const placeholders = externalIds.map(() => "?").join(", ");
-    changes = database
-      .query(
-        `UPDATE jobs SET active = 0
-         WHERE company_id = ? AND source_type = ? AND active = 1
-           AND external_id NOT IN (${placeholders})`,
-      )
-      .run(companyId, sourceType, ...externalIds).changes;
+    const retainedIds = new Set(externalIds);
+    const missing = (
+      database
+        .query(
+          `SELECT id, external_id FROM jobs
+           WHERE company_id = ? AND source_type = ? AND active = 1`,
+        )
+        .all(companyId, sourceType) as Array<{
+        id: string;
+        external_id: string | null;
+      }>
+    ).filter((job) => !job.external_id || !retainedIds.has(job.external_id));
+    const update = database.query(
+      "UPDATE jobs SET active = 0 WHERE id = ? AND active = 1",
+    );
+    database.transaction(() => {
+      for (const job of missing) {
+        changes += update.run(job.id).changes;
+      }
+    })();
   }
   recomputeCompanyStats(companyId);
   if (changes) reopenCompanyReview(companyId, "Published hiring roles closed.");
 }
 
 export function addContact(companyId: string, input: Record<string, unknown>) {
+  const parsedInput = ContactInputSchema.safeParse(input);
+  if (!parsedInput.success) {
+    throw badRequest(
+      parsedInput.error.issues[0]?.message || "Contact data is invalid.",
+    );
+  }
+  // Importers and provider adapters omit `reviewed`; owner-directed contact
+  // creation always supplies it through the editor. Source refreshes may enrich
+  // an unreviewed lead, but must not overwrite a record the owner already
+  // reviewed or silently replace the selected primary.
+  const sourceMerge = parsedInput.data.reviewed === undefined;
+  input = parsedInput.data;
   const db = getDatabase();
-  const email = (input.email as string | null)?.toLowerCase() ?? null;
-  const linkedinUrl = (input.linkedinUrl as string | null) ?? null;
+  const email = normalizeEmailAddress(input.email as string | null);
+  const linkedinUrl = normalizeHttpUrl(input.linkedinUrl as string | null);
   const fullName = String(input.fullName || "").trim();
   const employmentObservedTitle =
     (input.observedTitle as string | null) ??
@@ -1813,7 +2512,7 @@ export function addContact(companyId: string, input: Record<string, unknown>) {
     (input.phoneConfirmed !== true ||
       !String(input.phoneSource || "").trim())
   ) {
-    throw new Error(
+    throw badRequest(
       "A manually added phone requires confirmation and a source URL or note.",
     );
   }
@@ -1822,7 +2521,7 @@ export function addContact(companyId: string, input: Record<string, unknown>) {
     (!String(employmentObservedTitle || "").trim() ||
       !String(input.employmentObservedAt || "").trim())
   ) {
-    throw new Error(
+    throw badRequest(
       "Current employment confirmation requires an observed title and observed date.",
     );
   }
@@ -1853,62 +2552,111 @@ export function addContact(companyId: string, input: Record<string, unknown>) {
       (input.title as string | null) ?? null,
     ) as { id: string } | null;
   if (existing) {
-    return patchContact(existing.id, {
+    const current = getContact(existing.id);
+    if (!current) return null;
+    if (sourceMerge && current.reviewed) {
+      return current;
+    }
+    const mergePatch: Record<string, unknown> = {
       ...input,
       fullName,
       email,
       linkedinUrl,
-    });
+    };
+    if (sourceMerge) {
+      for (const [key, value] of Object.entries(mergePatch)) {
+        if (value === null || value === undefined || value === "") {
+          delete mergePatch[key];
+        }
+      }
+      if (current.status === "primary") {
+        mergePatch.status = "primary";
+      } else if (mergePatch.status === "primary") {
+        const reviewedPrimary = db
+          .query(
+            `SELECT id FROM contacts
+             WHERE company_id = ? AND status = 'primary' AND reviewed = 1
+               AND id != ?
+             LIMIT 1`,
+          )
+          .get(companyId, current.id) as { id: string } | null;
+        if (reviewedPrimary) mergePatch.status = current.status;
+      }
+    }
+    const sameEmail =
+      Object.hasOwn(mergePatch, "email") &&
+      normalizeEmailAddress(mergePatch.email as string | null) === current.email;
+    if (
+      sourceMerge &&
+      (sameEmail || !Object.hasOwn(mergePatch, "email"))
+    ) {
+      delete mergePatch.emailStatus;
+      delete mergePatch.emailVerifiedAt;
+    }
+    return patchContact(existing.id, mergePatch);
   }
   const id = newId();
   const timestamp = nowIso();
-  if (input.status === "primary") {
-    db.query(
-      `UPDATE contacts SET status = 'alternate', updated_at = ?
-       WHERE company_id = ? AND status = 'primary'`,
-    ).run(timestamp, companyId);
+  let effectiveStatus = (input.status as string) ?? "candidate";
+  if (sourceMerge && effectiveStatus === "primary") {
+    const reviewedPrimary = db
+      .query(
+        `SELECT id FROM contacts
+         WHERE company_id = ? AND status = 'primary' AND reviewed = 1
+         LIMIT 1`,
+      )
+      .get(companyId) as { id: string } | null;
+    if (reviewedPrimary) effectiveStatus = "alternate";
   }
-  db
-    .query(
-      `INSERT INTO contacts (
-        id, company_id, first_name, last_name, full_name, title, role_category,
-        email, email_type, fallback_reason, fallback_confirmed, email_status,
-        email_verified_at, phone, phone_type, phone_confirmed, phone_source,
-        linkedin_url, employment_confirmed, observed_title,
-        employment_observed_at, rank, status, reviewed, notes, created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      id,
-      companyId,
-      (input.firstName as string | null) ?? null,
-      (input.lastName as string | null) ?? null,
-      fullName,
-      (input.title as string | null) ?? null,
-      (input.roleCategory as string | null) ?? null,
-      email,
-      (input.emailType as string) ?? "unknown",
-      (input.fallbackReason as string | null) ?? null,
-      input.fallbackConfirmed ? 1 : 0,
-      (input.emailStatus as string) ?? "unverified",
-      (input.emailVerifiedAt as string | null) ?? null,
-      (input.phone as string | null) ?? null,
-      (input.phoneType as string) ?? "unknown",
-      input.phoneConfirmed ? 1 : 0,
-      (input.phoneSource as string | null) ?? null,
-      linkedinUrl,
-      input.employmentConfirmed ? 1 : 0,
-      employmentObservedTitle,
-      (input.employmentObservedAt as string | null) ?? null,
-      (input.rank as number) ?? 1,
-      (input.status as string) ?? "candidate",
-      input.reviewed ? 1 : 0,
-      (input.notes as string | null) ?? null,
-      timestamp,
-      timestamp,
-    );
-  if (input.status === "primary") {
+  db.transaction(() => {
+    if (effectiveStatus === "primary") {
+      db.query(
+        `UPDATE contacts SET status = 'alternate', updated_at = ?
+         WHERE company_id = ? AND status = 'primary'`,
+      ).run(timestamp, companyId);
+    }
+    db
+      .query(
+        `INSERT INTO contacts (
+          id, company_id, first_name, last_name, full_name, title, role_category,
+          email, email_type, fallback_reason, fallback_confirmed, email_status,
+          email_verified_at, phone, phone_type, phone_confirmed, phone_source,
+          linkedin_url, employment_confirmed, observed_title,
+          employment_observed_at, rank, status, reviewed, notes, created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        companyId,
+        (input.firstName as string | null) ?? null,
+        (input.lastName as string | null) ?? null,
+        fullName,
+        (input.title as string | null) ?? null,
+        (input.roleCategory as string | null) ?? null,
+        email,
+        (input.emailType as string) ?? "unknown",
+        (input.fallbackReason as string | null) ?? null,
+        input.fallbackConfirmed ? 1 : 0,
+        (input.emailStatus as string) ?? "unverified",
+        (input.emailVerifiedAt as string | null) ?? null,
+        (input.phone as string | null) ?? null,
+        (input.phoneType as string) ?? "unknown",
+        input.phoneConfirmed ? 1 : 0,
+        (input.phoneSource as string | null) ?? null,
+        linkedinUrl,
+        input.employmentConfirmed ? 1 : 0,
+        employmentObservedTitle,
+        (input.employmentObservedAt as string | null) ?? null,
+        (input.rank as number) ?? 1,
+        effectiveStatus,
+        input.reviewed ? 1 : 0,
+        (input.notes as string | null) ?? null,
+        timestamp,
+        timestamp,
+      );
+  })();
+  if (effectiveStatus === "primary") {
     reopenCompanyReview(companyId, "Primary decision-maker changed.");
   }
   addAudit("contact.created", "contact", id, `Added ${fullName}`, { companyId });
@@ -1937,6 +2685,13 @@ export function getContact(contactId: string) {
 }
 
 export function patchContact(contactId: string, patch: Record<string, unknown>) {
+  const parsedPatch = ContactPatchSchema.safeParse(patch);
+  if (!parsedPatch.success) {
+    throw badRequest(
+      parsedPatch.error.issues[0]?.message || "Contact update is invalid.",
+    );
+  }
+  patch = parsedPatch.data;
   const database = getDatabase();
   const before = database
     .query(
@@ -1953,6 +2708,7 @@ export function patchContact(contactId: string, patch: Record<string, unknown>) 
       observed_title: string | null;
       employment_observed_at: string | null;
     } | null;
+  if (!before) return null;
   if (patch.phone) {
     const confirmed =
       patch.phoneConfirmed === true ||
@@ -1960,7 +2716,7 @@ export function patchContact(contactId: string, patch: Record<string, unknown>) 
     const source =
       patch.phoneSource === undefined ? before?.phone_source : patch.phoneSource;
     if (!confirmed || !String(source || "").trim()) {
-      throw new Error(
+      throw badRequest(
         "A manually added phone requires confirmation and a source URL or note.",
       );
     }
@@ -1984,7 +2740,7 @@ export function patchContact(contactId: string, patch: Record<string, unknown>) 
         ? before?.employment_observed_at
         : patch.employmentObservedAt;
     if (!String(observedTitle || "").trim() || !String(observedAt || "").trim()) {
-      throw new Error(
+      throw badRequest(
         "Current employment confirmation requires an observed title and observed date.",
       );
     }
@@ -2034,10 +2790,17 @@ export function patchContact(contactId: string, patch: Record<string, unknown>) 
     ) {
       params.push(value ? 1 : 0);
     }
-    else if (key === "email") params.push(value ? String(value).toLowerCase() : null);
+    else if (key === "email") {
+      params.push(normalizeEmailAddress(value as string | null));
+    }
+    else if (key === "linkedinUrl") {
+      params.push(normalizeHttpUrl(value as string | null));
+    }
     else params.push(value as SqlValue);
   }
-  const emailChanged = Object.hasOwn(patch, "email");
+  const emailChanged =
+    Object.hasOwn(patch, "email") &&
+    normalizeEmailAddress(patch.email as string | null) !== before.email;
   if (emailChanged && patch.emailStatus === undefined) {
     assignments.push("email_status = 'unverified'");
   }
@@ -2054,27 +2817,40 @@ export function patchContact(contactId: string, patch: Record<string, unknown>) 
     "observedTitle",
     "employmentObservedAt",
   ];
+  const hasMaterialContactChange = materialContactFields.some((key) =>
+    key === "email" ? emailChanged : Object.hasOwn(patch, key),
+  );
   if (
-    materialContactFields.some((key) => Object.hasOwn(patch, key)) &&
+    hasMaterialContactChange &&
     patch.reviewed === undefined
   ) {
     assignments.push("reviewed = 0");
   }
   if (!assignments.length) return getContact(contactId);
   assignments.push("updated_at = ?");
-  params.push(nowIso(), contactId);
-  if (before && patch.status === "primary") {
-    database
-      .query(
-        `UPDATE contacts SET status = 'alternate', updated_at = ?
-         WHERE company_id = ? AND id != ? AND status = 'primary'`,
-      )
-      .run(nowIso(), before.company_id, contactId);
+  const timestamp = nowIso();
+  params.push(timestamp, contactId);
+  database.transaction(() => {
+    if (patch.status === "primary") {
+      database
+        .query(
+          `UPDATE contacts SET status = 'alternate', updated_at = ?
+           WHERE company_id = ? AND id != ? AND status = 'primary'`,
+        )
+        .run(timestamp, before.company_id, contactId);
+    }
+    const result = database
+      .query(`UPDATE contacts SET ${assignments.join(", ")} WHERE id = ?`)
+      .run(...params);
+    if (result.changes !== 1) {
+      throw conflictError("The contact changed before it could be updated.");
+    }
+  })();
+  if (patch.status === "primary") {
     reopenCompanyReview(before.company_id, "Primary decision-maker changed.");
+  } else if (hasMaterialContactChange) {
+    invalidateApprovedDrafts(before.company_id, "Material contact data changed.");
   }
-  database
-    .query(`UPDATE contacts SET ${assignments.join(", ")} WHERE id = ?`)
-    .run(...params);
   const after = getContact(contactId);
   if (after?.status === "suppressed" && after.email) {
     addSuppression(
@@ -2112,7 +2888,7 @@ export function recordReview(
   notes?: string,
 ) {
   const current = getCompany(companyId);
-  if (!current) throw new Error("Company not found.");
+  if (!current) throw notFound("Company not found.");
   if (decision === "approved") {
     const required = new Set([
       "company_fit",
@@ -2125,14 +2901,14 @@ export function recordReview(
       (item) => required.has(item.id) && item.state !== "complete",
     );
     if (issues.length) {
-      throw new Error(
+      throw conflictError(
         `Complete company qualification first: ${issues
           .map((item) => item.label)
           .join(", ")}.`,
       );
     }
   } else if (!notes?.trim()) {
-    throw new Error(
+    throw badRequest(
       decision === "rejected"
         ? "Add a rejection reason before completing review."
         : "Add a note describing the remaining research.",
@@ -2324,7 +3100,7 @@ export function createOrUpdateDraft(input: {
     )
     .get(input.companyId, input.contactId) as { id: string } | null;
   if (ambiguous) {
-    throw new Error(
+    throw conflictError(
       "This contact has a delivery whose result is unresolved. Check Gmail before creating another message.",
     );
   }
@@ -2466,7 +3242,7 @@ export function patchDraft(draftId: string, input: Record<string, unknown>) {
   const current = getDraft(draftId);
   if (!current) return null;
   if (!["draft", "approved"].includes(current.status)) {
-    throw new Error("Sent and unresolved delivery records are immutable history.");
+    throw conflictError("Sent and unresolved delivery records are immutable history.");
   }
   const allowed: Record<string, string> = {
     subject: "subject",
@@ -2482,7 +3258,9 @@ export function patchDraft(draftId: string, input: Record<string, unknown>) {
   const proposedBody =
     typeof input.body === "string" ? input.body : current.body;
   if (input.status === "approved" && /\[your name\]/i.test(proposedBody)) {
-    throw new Error("Replace the [Your name] placeholder before approving this message.");
+    throw badRequest(
+      "Replace the [Your name] placeholder before approving this message.",
+    );
   }
   for (const [key, value] of Object.entries(input)) {
     if (!allowed[key]) continue;
@@ -2490,7 +3268,7 @@ export function patchDraft(draftId: string, input: Record<string, unknown>) {
     params.push(value as SqlValue);
   }
   if (input.status === "approved" && !current.editedAt && !contentChanged) {
-    throw new Error("Edit this generated message before approving it.");
+    throw badRequest("Edit this generated message before approving it.");
   }
   if (contentChanged) {
     assignments.push("edited_at = ?");
@@ -2541,26 +3319,38 @@ export function getOutreachRateCounts(timeZone?: string) {
     .query(
       `SELECT
         SUM(CASE
-          WHEN datetime(sent_at) >= datetime('now', '-1 hour') THEN 1
+          WHEN datetime(
+            CASE WHEN status = 'send_unknown' THEN updated_at ELSE sent_at END
+          ) >= datetime('now', '-1 hour') THEN 1
           ELSE 0
-        END) AS sent_last_hour
+        END) AS sent_last_hour,
+        SUM(CASE WHEN status = 'send_unknown' THEN 1 ELSE 0 END)
+          AS unresolved_unknown
        FROM outreach_drafts
-       WHERE status IN ('sent', 'replied', 'bounced') AND sent_at IS NOT NULL`,
+       WHERE status IN (
+         'sent', 'replied', 'bounced', 'no_response', 'send_unknown'
+       )`,
     )
-    .get() as { sent_last_hour: number | null };
+    .get() as { sent_last_hour: number | null; unresolved_unknown: number | null };
   const sentToday = timeZone
     ? (
         getDatabase()
           .query(
-            `SELECT sent_at FROM outreach_drafts
-             WHERE status IN ('sent', 'replied', 'bounced')
-               AND sent_at IS NOT NULL
-               AND datetime(sent_at) >= datetime('now', '-2 days')`,
+            `SELECT
+               CASE WHEN status = 'send_unknown' THEN updated_at ELSE sent_at END
+                 AS attempted_at
+             FROM outreach_drafts
+             WHERE status IN (
+               'sent', 'replied', 'bounced', 'no_response', 'send_unknown'
+             )
+               AND datetime(
+                 CASE WHEN status = 'send_unknown' THEN updated_at ELSE sent_at END
+               ) >= datetime('now', '-2 days')`,
           )
-          .all() as Array<{ sent_at: string }>
+          .all() as Array<{ attempted_at: string }>
       ).filter(
         (item) =>
-          zonedDateKey(new Date(item.sent_at), timeZone) ===
+          zonedDateKey(new Date(item.attempted_at), timeZone) ===
           zonedDateKey(new Date(), timeZone),
       ).length
     : Number(
@@ -2568,9 +3358,13 @@ export function getOutreachRateCounts(timeZone?: string) {
           getDatabase()
             .query(
               `SELECT COUNT(*) AS count FROM outreach_drafts
-               WHERE status IN ('sent', 'replied', 'bounced')
-                 AND sent_at IS NOT NULL
-                 AND date(sent_at, 'localtime') = date('now', 'localtime')`,
+               WHERE status IN (
+                 'sent', 'replied', 'bounced', 'no_response', 'send_unknown'
+               )
+                 AND date(
+                   CASE WHEN status = 'send_unknown' THEN updated_at ELSE sent_at END,
+                   'localtime'
+                 ) = date('now', 'localtime')`,
             )
             .get() as { count: number }
         ).count,
@@ -2578,6 +3372,7 @@ export function getOutreachRateCounts(timeZone?: string) {
   return {
     sentLastHour: Number(row.sent_last_hour || 0),
     sentToday,
+    unresolvedUnknown: Number(row.unresolved_unknown || 0),
   };
 }
 
@@ -2593,7 +3388,7 @@ export function claimDraftForSend(draftId: string) {
 }
 
 export function releaseDraftAfterSendFailure(draftId: string, message: string) {
-  getDatabase()
+  const result = getDatabase()
     .query(
       `UPDATE outreach_drafts
        SET status = 'approved', updated_at = ?
@@ -2601,7 +3396,7 @@ export function releaseDraftAfterSendFailure(draftId: string, message: string) {
     )
     .run(nowIso(), draftId);
   const draft = getDraft(draftId);
-  if (draft) {
+  if (result.changes === 1 && draft) {
     addAudit(
       "outreach.send_failed",
       "company",
@@ -2614,7 +3409,7 @@ export function releaseDraftAfterSendFailure(draftId: string, message: string) {
 }
 
 export function markDraftSendUnknown(draftId: string, message: string) {
-  getDatabase()
+  const result = getDatabase()
     .query(
       `UPDATE outreach_drafts
        SET status = 'send_unknown', updated_at = ?
@@ -2622,7 +3417,7 @@ export function markDraftSendUnknown(draftId: string, message: string) {
     )
     .run(nowIso(), draftId);
   const draft = getDraft(draftId);
-  if (draft) {
+  if (result.changes === 1 && draft) {
     addAudit(
       "outreach.send_unknown",
       "company",
@@ -2634,13 +3429,62 @@ export function markDraftSendUnknown(draftId: string, message: string) {
   return draft;
 }
 
+export function resolveUnknownDraft(
+  draftId: string,
+  resolution: "sent" | "not_sent",
+  note: string,
+) {
+  const current = getDraft(draftId);
+  if (!current) throw notFound("Draft not found.");
+  if (current.status !== "send_unknown") {
+    throw conflictError("Only an unknown Gmail delivery can be resolved here.");
+  }
+  const normalizedNote = note.trim();
+  if (!normalizedNote) {
+    throw conflictError("Record how Gmail Sent mail was checked.");
+  }
+  const timestamp = nowIso();
+  const result =
+    resolution === "sent"
+      ? getDatabase()
+          .query(
+            `UPDATE outreach_drafts
+             SET status = 'sent', sent_at = COALESCE(sent_at, updated_at),
+                 outcome_note = ?, updated_at = ?
+             WHERE id = ? AND status = 'send_unknown'`,
+          )
+          .run(`Manual delivery resolution: ${normalizedNote}`, timestamp, draftId)
+      : getDatabase()
+          .query(
+            `UPDATE outreach_drafts
+             SET status = 'approved', outcome_note = NULL, updated_at = ?
+             WHERE id = ? AND status = 'send_unknown'`,
+          )
+          .run(timestamp, draftId);
+  if (result.changes !== 1) {
+    throw conflictError("The delivery state changed before it could be resolved.");
+  }
+  addAudit(
+    resolution === "sent"
+      ? "outreach.send_unknown_resolved_sent"
+      : "outreach.send_unknown_resolved_not_sent",
+    "company",
+    current.companyId,
+    resolution === "sent"
+      ? "Confirmed the unknown Gmail attempt appears in Sent mail"
+      : "Confirmed the unknown Gmail attempt was not sent",
+    { draftId, note: normalizedNote },
+  );
+  return getDraft(draftId);
+}
+
 export function markDraftSent(
   draftId: string,
   gmailMessageId: string,
   gmailThreadId?: string | null,
 ) {
   const timestamp = nowIso();
-  getDatabase()
+  const result = getDatabase()
     .query(
       `UPDATE outreach_drafts
        SET status = 'sent', sent_at = ?, gmail_message_id = ?,
@@ -2654,6 +3498,11 @@ export function markDraftSent(
       timestamp,
       draftId,
     );
+  if (result.changes !== 1) {
+    throw conflictError(
+      "The Gmail response arrived after the draft left its active send state.",
+    );
+  }
   const draft = getDraft(draftId);
   if (draft) {
     addAudit(
@@ -2673,9 +3522,9 @@ export function recordDraftOutcome(
   note?: string,
 ) {
   const draft = getDraft(draftId);
-  if (!draft) throw new Error("Draft not found.");
+  if (!draft) throw notFound("Draft not found.");
   if (draft.status !== "sent") {
-    throw new Error("Only a sent message can receive an outreach outcome.");
+    throw conflictError("Only a sent message can receive an outreach outcome.");
   }
   if (outcome === "no_response") {
     const settings = getSettings();
@@ -2688,7 +3537,7 @@ export function recordDraftOutcome(
       !Number.isFinite(sentAt) ||
       Date.now() - sentAt < waitDays * 24 * 60 * 60 * 1_000
     ) {
-      throw new Error(
+      throw conflictError(
         `Wait ${waitDays} days after sending before marking no response.`,
       );
     }
@@ -2751,12 +3600,19 @@ export function isSuppressed(
   value: string,
   kind: "email" | "domain" | "person" | "company",
 ) {
+  const normalizedValue =
+    kind === "email"
+      ? normalizeEmailAddress(value)
+      : kind === "domain"
+        ? normalizeDomain(value)
+        : value.trim();
+  if (!normalizedValue) return false;
   const row = getDatabase()
     .query(
       `SELECT 1 AS found FROM suppression_entries
        WHERE lower(value) = lower(?) AND kind = ? LIMIT 1`,
     )
-    .get(value, kind) as { found: number } | null;
+    .get(normalizedValue, kind) as { found: number } | null;
   return Boolean(row);
 }
 
@@ -2766,23 +3622,37 @@ export function addSuppression(
   reason: string,
 ) {
   const normalizedValue =
-    kind === "email" || kind === "domain" ? value.trim().toLowerCase() : value.trim();
-  if (!normalizedValue) throw new Error("Suppression value is required.");
+    kind === "email"
+      ? normalizeEmailAddress(value)
+      : kind === "domain"
+        ? normalizeDomain(value)
+        : value.trim().slice(0, 2_000);
+  if (!normalizedValue) {
+    throw badRequest(
+      kind === "email"
+        ? "Enter a valid email address to suppress."
+        : kind === "domain"
+          ? "Enter a valid public domain to suppress."
+          : "Suppression value is required.",
+    );
+  }
+  const normalizedReason = reason.trim().slice(0, 2_000);
+  if (!normalizedReason) throw badRequest("A suppression reason is required.");
   getDatabase()
     .query(
       `INSERT INTO suppression_entries (id, value, kind, reason, created_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(value, kind) DO UPDATE SET reason = excluded.reason`,
     )
-    .run(newId(), normalizedValue, kind, reason.trim(), nowIso());
+    .run(newId(), normalizedValue, kind, normalizedReason, nowIso());
   addAudit(
     "suppression.added",
     kind,
     normalizedValue,
     `Suppressed ${kind}`,
-    { reason },
+    { reason: normalizedReason },
   );
-  return { value: normalizedValue, kind, reason: reason.trim() };
+  return { value: normalizedValue, kind, reason: normalizedReason };
 }
 
 export function listSuppressions() {

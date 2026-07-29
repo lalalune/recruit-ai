@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import Papa from "papaparse";
+import { createHash } from "node:crypto";
 import {
   createApp,
   isAllowedLoopbackHost,
@@ -497,15 +498,15 @@ describe("local data management", () => {
       domain: "backup-roundtrip-labs.com",
     });
     patchCompany(company.id, { notes: "Original local record." });
-    const snapshotPath = path.join(
-      getSnapshotsDir(),
-      `${"a".repeat(64)}.html`,
-    );
+    const snapshotContent = "original snapshot";
+    const snapshotName = `${createHash("sha256").update(snapshotContent).digest("hex")}.html`;
+    const snapshotPath = path.join(getSnapshotsDir(), snapshotName);
+    const extraSnapshotContent = "not in backup";
     const extraSnapshotPath = path.join(
       getSnapshotsDir(),
-      `${"b".repeat(64)}.html`,
+      `${createHash("sha256").update(extraSnapshotContent).digest("hex")}.html`,
     );
-    writeFileSync(snapshotPath, "original snapshot", "utf8");
+    writeFileSync(snapshotPath, snapshotContent, "utf8");
     addEvidence({
       entityType: "company",
       entityId: company.id,
@@ -551,8 +552,7 @@ describe("local data management", () => {
     expect(inspected.data.databaseBytes).toBeGreaterThan(100);
 
     patchCompany(company.id, { notes: "Mutated after backup." });
-    writeFileSync(snapshotPath, "mutated snapshot", "utf8");
-    writeFileSync(extraSnapshotPath, "not in backup", "utf8");
+    writeFileSync(extraSnapshotPath, extraSnapshotContent, "utf8");
     const wrongConfirmation = await apiMutation(app, "/api/data/restore", {
       backupText,
       confirmation: "RESTORE",
@@ -607,6 +607,84 @@ describe("local data management", () => {
       name: "Retained Production Seed",
       domain: "retained-production-seed.com",
     });
+    const demoCompany = getDatabase()
+      .query("SELECT id FROM companies WHERE domain = ?")
+      .get("northstar-robotics.example") as { id: string };
+    const demoSnapshotContent = "fictional demo snapshot";
+    const demoSnapshotPath = path.join(
+      getSnapshotsDir(),
+      `${createHash("sha256").update(demoSnapshotContent).digest("hex")}.html`,
+    );
+    const realSnapshotContent = "retained production snapshot";
+    const realSnapshotPath = path.join(
+      getSnapshotsDir(),
+      `${createHash("sha256").update(realSnapshotContent).digest("hex")}.html`,
+    );
+    writeFileSync(demoSnapshotPath, demoSnapshotContent, "utf8");
+    writeFileSync(realSnapshotPath, realSnapshotContent, "utf8");
+    const demoEvidenceId = addEvidence({
+      entityType: "company",
+      entityId: demoCompany.id,
+      fieldName: "demo_snapshot",
+      sourceType: "demo",
+      sourceLabel: "Fictional demo fixture",
+      screenshotPath: demoSnapshotPath,
+    });
+    addEvidence({
+      entityType: "company",
+      entityId: realCompany.id,
+      fieldName: "production_snapshot",
+      sourceType: "test",
+      sourceLabel: "Retained production evidence",
+      screenshotPath: realSnapshotPath,
+    });
+    getDatabase()
+      .query(
+        `INSERT INTO audit_events (
+          id, event_type, entity_type, entity_id, summary, created_at
+        ) VALUES (?, 'demo.evidence_created', 'evidence', ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        demoEvidenceId,
+        "Created fictional demo evidence",
+        new Date().toISOString(),
+      );
+    const demoEntityIds = (
+      getDatabase()
+        .query(
+          `SELECT id FROM companies WHERE domain LIKE '%.example'
+           UNION SELECT contacts.id FROM contacts
+             JOIN companies ON companies.id = contacts.company_id
+             WHERE companies.domain LIKE '%.example'
+           UNION SELECT jobs.id FROM jobs
+             JOIN companies ON companies.id = jobs.company_id
+             WHERE companies.domain LIKE '%.example'
+           UNION SELECT evidence.id FROM evidence
+             WHERE evidence.entity_id IN (
+               SELECT id FROM companies WHERE domain LIKE '%.example'
+               UNION SELECT contacts.id FROM contacts
+                 JOIN companies ON companies.id = contacts.company_id
+                 WHERE companies.domain LIKE '%.example'
+               UNION SELECT jobs.id FROM jobs
+                 JOIN companies ON companies.id = jobs.company_id
+                 WHERE companies.domain LIKE '%.example'
+             )`,
+        )
+        .all() as Array<{ id: string }>
+    ).map((row) => row.id);
+    const demoAuditCount = () =>
+      Number(
+        (
+          getDatabase()
+            .query(
+              `SELECT COUNT(*) AS count FROM audit_events
+               WHERE entity_id IN (${demoEntityIds.map(() => "?").join(", ")})`,
+            )
+            .get(...demoEntityIds) as { count: number }
+        ).count,
+      );
+    expect(demoAuditCount()).toBeGreaterThan(0);
     const beforeCount = (
       getDatabase().query("SELECT COUNT(*) AS count FROM companies").get() as {
         count: number;
@@ -629,11 +707,29 @@ describe("local data management", () => {
       confirmation: "CLEAR DEMO DATA",
     });
     const payload = (await cleared.json()) as {
-      data: { removedCompanies: number };
+      data: {
+        removedCompanies: number;
+        removedAuditEvents: number;
+        removedSnapshots: number;
+      };
     };
     expect(cleared.status).toBe(200);
     expect(payload.data.removedCompanies).toBe(3);
+    expect(payload.data.removedAuditEvents).toBeGreaterThan(0);
+    expect(payload.data.removedSnapshots).toBe(1);
     expect(getCompany(realCompany.id)?.name).toBe("Retained Production Seed");
+    expect(demoAuditCount()).toBe(0);
+    expect(
+      (
+        getDatabase()
+          .query(
+            "SELECT COUNT(*) AS count FROM audit_events WHERE entity_id = ?",
+          )
+          .get(realCompany.id) as { count: number }
+      ).count,
+    ).toBeGreaterThan(0);
+    expect(existsSync(demoSnapshotPath)).toBe(false);
+    expect(existsSync(realSnapshotPath)).toBe(true);
     expect(
       (
         getDatabase()
@@ -649,17 +745,18 @@ describe("local data management", () => {
       name: "Delete-All Recovery Labs",
       domain: "delete-all-recovery-labs.com",
     });
+    const snapshotContent = "recovery data";
     const snapshotPath = path.join(
       getSnapshotsDir(),
-      `${"c".repeat(64)}.html`,
+      `${createHash("sha256").update(snapshotContent).digest("hex")}.html`,
     );
-    writeFileSync(snapshotPath, "recovery data", "utf8");
+    writeFileSync(snapshotPath, snapshotContent, "utf8");
     addSuppression(
       "blocked@delete-all-recovery-labs.com",
       "email",
       "Test suppression",
     );
-    createSourceRun("test-source", { page: 1 });
+    const activeRun = createSourceRun("test-source", { page: 1 });
 
     const rejected = await apiMutation(app, "/api/data/delete-all", {
       confirmation: "DELETE ALL",
@@ -668,6 +765,24 @@ describe("local data management", () => {
     expect(getCompany(company.id)).not.toBeNull();
     expect(existsSync(snapshotPath)).toBe(true);
 
+    const blockedWhileResearching = await apiMutation(
+      app,
+      "/api/data/delete-all",
+      {
+        confirmation: "DELETE LOCAL DATA",
+      },
+    );
+    expect(blockedWhileResearching.status).toBe(409);
+    expect(
+      ((await blockedWhileResearching.json()) as { code: string }).code,
+    ).toBe("active_research");
+    expect(getCompany(company.id)).not.toBeNull();
+
+    finishSourceRun(activeRun.id, {
+      inserted: 0,
+      updated: 0,
+      skipped: 0,
+    });
     const deleted = await apiMutation(app, "/api/data/delete-all", {
       confirmation: "DELETE LOCAL DATA",
     });
@@ -788,6 +903,58 @@ describe("source-run idempotency", () => {
 });
 
 describe("CSV import aliases", () => {
+  test("rejects malformed structure and ambiguous owner mappings before writing", async () => {
+    expect(() =>
+      importCsv(
+        'company_name,website_url\n"Broken company,https://broken.test',
+        "Broken CSV",
+      ),
+    ).toThrow("CSV is malformed");
+    expect(() =>
+      importCsv(
+        "company_name, company_name\nFirst,Second",
+        "Duplicate headers",
+      ),
+    ).toThrow("unique header");
+    expect(() =>
+      importCsv(
+        "company_name,website_url\nMapped,https://mapped.test",
+        "Unknown mapping",
+        {
+          Missing: "company_name",
+        },
+      ),
+    ).toThrow("unknown column");
+    expect(() =>
+      importCsv(
+        "company_name,website_url\nMapped,https://mapped.test",
+        "Duplicate mapping",
+        {
+          company_name: "company_name",
+          website_url: "company_name",
+        },
+      ),
+    ).toThrow("only one CSV column");
+    expect(
+      (
+        getDatabase()
+          .query("SELECT COUNT(*) AS count FROM companies")
+          .get() as { count: number }
+      ).count,
+    ).toBe(0);
+
+    const app = createApp();
+    const response = await apiMutation(app, "/api/discovery/import", {
+      csv: "company_name,website_url\nMapped,https://mapped.test",
+      sourceLabel: "Missing company mapping",
+      mapping: { website_url: "website_url" },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      code: "invalid_csv_mapping",
+    });
+  });
+
   test("maps common company/contact headers and discards unconfirmed phones", () => {
     const csv = [
       "Organization,Company URL,City,Company Size,Industries,Contact,Role,Email,Phone,Phone Confirmed,Phone Source,Profile URL",
@@ -841,6 +1008,134 @@ describe("CSV import aliases", () => {
     });
   });
 
+  test("preserves owner state and records source notes on identical re-import", () => {
+    const csv = [
+      "company_name,domain,location,company_size,stage,notes,source_url",
+      '"Reimport AI",reimport-ai.test,"San Francisco, CA",10-25,Seed,"Provider research note.",https://reimport-ai.test/about',
+    ].join("\n");
+
+    expect(importCsv(csv, "Owner-state regression")).toMatchObject({
+      inserted: 1,
+      updated: 0,
+      skipped: 0,
+    });
+    const companyId = (
+      getDatabase()
+        .query("SELECT id FROM companies WHERE domain = ?")
+        .get("reimport-ai.test") as { id: string }
+    ).id;
+    expect(getCompany(companyId)).toMatchObject({
+      status: "needs_research",
+      reviewed: false,
+      notes: null,
+    });
+
+    patchCompany(companyId, {
+      status: "new",
+      reviewed: true,
+      notes: "Owner-curated research and decision notes.",
+    });
+    expect(importCsv(csv, "Owner-state regression")).toMatchObject({
+      inserted: 0,
+      updated: 1,
+      skipped: 0,
+    });
+
+    const current = getCompany(companyId);
+    expect(current).toMatchObject({
+      status: "new",
+      reviewed: true,
+      notes: "Owner-curated research and decision notes.",
+    });
+    const sourceNotes =
+      current?.evidence.filter((item) => item.fieldName === "source_note") || [];
+    expect(sourceNotes).toHaveLength(2);
+    expect(
+      sourceNotes.every(
+        (item) =>
+          item.value === "Provider research note." &&
+          item.sourceUrl === "https://reimport-ai.test/about",
+      ),
+    ).toBe(true);
+  });
+
+  test("preserves reviewed facts and notes while changed re-imports become conflicts", () => {
+    const originalCsv = [
+      "company_name,domain,location,company_size,stage,notes",
+      '"Conflict Robotics",conflict-robotics.test,"San Francisco, CA",10-20,Seed,"Initial provider note."',
+    ].join("\n");
+    importCsv(originalCsv, "Changed re-import regression");
+    const companyId = (
+      getDatabase()
+        .query("SELECT id FROM companies WHERE domain = ?")
+        .get("conflict-robotics.test") as { id: string }
+    ).id;
+    patchCompany(companyId, {
+      location: "Oakland, CA",
+      employeeCountMin: 12,
+      employeeCountMax: 18,
+      stage: "Bootstrapped",
+      status: "approved",
+      reviewed: true,
+      notes: "Owner confirmed these facts directly with the founder.",
+    });
+
+    const changedCsv = [
+      "company_name,domain,location,company_size,stage,notes",
+      '"Conflict Robotics",conflict-robotics.test,"Berkeley, CA",40-60,"Series A","Updated provider note."',
+    ].join("\n");
+    expect(importCsv(changedCsv, "Changed re-import regression")).toMatchObject({
+      inserted: 0,
+      updated: 1,
+      skipped: 0,
+    });
+
+    const current = getCompany(companyId);
+    expect(current).toMatchObject({
+      location: "Oakland, CA",
+      employeeCountMin: 12,
+      employeeCountMax: 18,
+      stage: "Bootstrapped",
+      notes: "Owner confirmed these facts directly with the founder.",
+      status: "ready_for_review",
+      reviewed: false,
+    });
+    expect(
+      current?.conflicts
+        .filter((item) => item.status === "open")
+        .map((item) => ({
+          fieldName: item.fieldName,
+          currentValue: item.currentValue,
+          candidateValue: item.candidateValue,
+        })),
+    ).toEqual(
+      expect.arrayContaining([
+        {
+          fieldName: "location",
+          currentValue: "Oakland, CA",
+          candidateValue: "Berkeley, CA",
+        },
+        {
+          fieldName: "employee_count",
+          currentValue: "12–18",
+          candidateValue: "40–60",
+        },
+        {
+          fieldName: "stage",
+          currentValue: "Bootstrapped",
+          candidateValue: "Series A",
+        },
+      ]),
+    );
+    expect(
+      current?.evidence.some(
+        (item) =>
+          item.fieldName === "source_note" &&
+          item.value === "Updated provider note.",
+      ),
+    ).toBe(true);
+  });
+
   test("applies an explicit owner-reviewed column mapping through the API", async () => {
     const app = createApp();
     const csv = [
@@ -889,6 +1184,57 @@ describe("CSV import aliases", () => {
   });
 });
 
+describe("API input boundaries", () => {
+  test("rejects invalid draft pagination, oversized contacts, and ambiguous patches", async () => {
+    const app = createApp();
+    const invalidDraftQueries = [
+      "/api/outreach/drafts?limit=-1",
+      "/api/outreach/drafts?offset=nope",
+      "/api/outreach/drafts?view=typo",
+      "/api/outreach/drafts?unknown=true",
+    ];
+    for (const route of invalidDraftQueries) {
+      const response = await app.request(`http://localhost${route}`);
+      expect(response.status).toBe(400);
+    }
+
+    const company = upsertCompany({ name: "Input Boundary Labs" });
+    const oversizedContact = await apiMutation(
+      app,
+      `/api/companies/${company.id}/contacts`,
+      { fullName: "x".repeat(501) },
+    );
+    expect(oversizedContact.status).toBe(400);
+    const invalidDomain = await apiMutation(
+      app,
+      `/api/companies/${company.id}`,
+      { domain: "localhost" },
+      "PATCH",
+    );
+    expect(invalidDomain.status).toBe(400);
+
+    const contact = addContact(company.id, {
+      fullName: "Boundary Owner",
+      title: "CEO",
+      status: "primary",
+    });
+    const draft = generateDraft(company.id, contact!.id, "concise");
+    const emptyPatch = await apiMutation(
+      app,
+      `/api/outreach/drafts/${draft!.id}`,
+      {},
+      "PATCH",
+    );
+    expect(emptyPatch.status).toBe(400);
+    const unknownDomainOption = await apiMutation(
+      app,
+      `/api/companies/${company.id}/research/domain`,
+      { autoApplyHighConfidence: false, unexpected: true },
+    );
+    expect(unknownDomainOption.status).toBe(400);
+  });
+});
+
 describe("outreach safety gates", () => {
   test("requires confirmed employment, the current primary, and documented fallback email", async () => {
     configureGmailForTests();
@@ -919,12 +1265,14 @@ describe("outreach safety gates", () => {
       employmentObservedAt: new Date().toISOString(),
       reviewed: true,
     });
+    patchDraft(draft.id, { status: "approved" });
     await expect(sendApprovedDraft(draft.id)).rejects.toThrow(
       "Only the current primary decision-maker",
     );
 
     patchContact(contact!.id, { status: "primary" });
     recordReview(companyId, "approved", "Primary decision-maker selected.");
+    patchDraft(draft.id, { status: "approved" });
     await expect(sendApprovedDraft(draft.id)).rejects.toThrow(
       "Document why a personal or generic address is the necessary fallback",
     );
@@ -933,6 +1281,7 @@ describe("outreach safety gates", () => {
       fallbackConfirmed: true,
       fallbackReason: "No work address was found after checking the company domain.",
     });
+    patchDraft(draft.id, { status: "approved" });
     const sent = await withMockedGmailSend(() => sendApprovedDraft(draft.id));
     expect(sent.result).toMatchObject({ id: draft.id, status: "sent" });
     expect(sent.requests).toEqual([

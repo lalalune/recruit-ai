@@ -275,11 +275,16 @@ function ProviderDialog({
       setOpen(false);
     },
   });
+  function handleOpenChange(nextOpen: boolean) {
+    setValue("");
+    mutation.reset();
+    setOpen(nextOpen);
+  }
 
   return (
     <Dialog
       description="The value is never shown again. Environment variables override locally saved keys."
-      onOpenChange={setOpen}
+      onOpenChange={handleOpenChange}
       open={open}
       title={`Configure ${provider.label}`}
       trigger={<Button>{configured ? "Replace key" : "Add key"}</Button>}
@@ -332,7 +337,7 @@ function ProviderDialog({
             ) : null}
           </div>
           <div className="button-group">
-            <Button onClick={() => setOpen(false)}>Cancel</Button>
+            <Button onClick={() => handleOpenChange(false)}>Cancel</Button>
             <Button
               disabled={!value.trim() || mutation.isPending}
               type="submit"
@@ -403,11 +408,17 @@ function GoogleCredentialsDialog({
       setOpen(false);
     },
   });
+  function handleOpenChange(nextOpen: boolean) {
+    setClientId("");
+    setClientSecret("");
+    mutation.reset();
+    setOpen(nextOpen);
+  }
 
   return (
     <Dialog
       description="Create a Desktop app OAuth client in Google Cloud, then save both values locally."
-      onOpenChange={setOpen}
+      onOpenChange={handleOpenChange}
       open={open}
       title="Google OAuth credentials"
       trigger={
@@ -451,7 +462,7 @@ function GoogleCredentialsDialog({
           <InlineNotice tone="danger">{mutation.error.message}</InlineNotice>
         ) : null}
         <div className="dialog-actions">
-          <Button onClick={() => setOpen(false)}>Cancel</Button>
+          <Button onClick={() => handleOpenChange(false)}>Cancel</Button>
           <Button
             disabled={mutation.isPending || (!clientId && !clientSecret)}
             type="submit"
@@ -589,6 +600,8 @@ export function SettingsPage() {
     queryFn: api.dataStatus,
   });
   const [form, setForm] = useState<AppSettings>(defaults);
+  const formHydrated = useRef(false);
+  const dirtyFields = useRef(new Set<keyof AppSettings>());
   const [savedSection, setSavedSection] = useState<string | null>(null);
   const [dataMessage, setDataMessage] = useState<string | null>(null);
   const restoreFileInput = useRef<HTMLInputElement>(null);
@@ -613,8 +626,61 @@ export function SettingsPage() {
     ]);
 
   useEffect(() => {
-    if (settings.data) setForm(fromResponse(settings.data));
+    if (!settings.data) return;
+    const incoming = fromResponse(settings.data);
+    setForm((current) => {
+      if (!formHydrated.current) {
+        formHydrated.current = true;
+        return incoming;
+      }
+      const merged = { ...current };
+      for (const key of Object.keys(incoming) as Array<keyof AppSettings>) {
+        if (!dirtyFields.current.has(key)) {
+          (merged[key] as AppSettings[typeof key]) = incoming[key];
+        }
+      }
+      return merged;
+    });
   }, [settings.data]);
+
+  const sectionFields: Record<string, Array<keyof AppSettings>> = {
+    scope: [
+      "scopeLocation",
+      "employeeMin",
+      "employeeMax",
+      "industries",
+      "jobFreshnessDays",
+      "jobRefreshDays",
+      "maxEvidenceAgeDays",
+      "companySitePageLimit",
+      "technologyOnlyDataSf",
+      "autoPrioritizeHiring",
+      "emailFreshnessDays",
+      "catchAllPolicy",
+      "secondVerifier",
+      "excludeSocialJustice",
+    ],
+    rate: [
+      "hourlyCap",
+      "dailyCap",
+      "sendWindowStart",
+      "sendWindowEnd",
+      "sendDays",
+      "timeZone",
+      "noResponseWaitDays",
+      "bouncePauseEnabled",
+      "bounceThreshold",
+      "sendingEnabled",
+    ],
+    identity: [
+      "senderName",
+      "organizationName",
+      "postalAddress",
+      "optOutText",
+      "replyHandlingNote",
+      "complianceConfirmed",
+    ],
+  };
 
   const saveMutation = useMutation({
     mutationFn: ({
@@ -624,6 +690,9 @@ export function SettingsPage() {
       values: Record<string, unknown>;
     }) => api.patchSettings(values),
     onSuccess: async (_, variables) => {
+      for (const key of sectionFields[variables.section] || []) {
+        dirtyFields.current.delete(key);
+      }
       setSavedSection(variables.section);
       window.setTimeout(() => setSavedSection(null), 1_800);
       await Promise.all([
@@ -641,7 +710,8 @@ export function SettingsPage() {
   const gmailDisconnectMutation = useMutation({
     mutationFn: api.gmailDisconnect,
     onSuccess: async () => {
-      update("sendingEnabled", false);
+      dirtyFields.current.delete("sendingEnabled");
+      setForm((current) => ({ ...current, sendingEnabled: false }));
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["gmail-status"] }),
         queryClient.invalidateQueries({ queryKey: ["settings"] }),
@@ -705,11 +775,13 @@ export function SettingsPage() {
       setDataMessage(
         `Local data restored. A safety backup was saved as ${result.preRestoreBackup}.`,
       );
+      dirtyFields.current.clear();
       await invalidateWorkspaceData();
     },
   });
 
   function update<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
+    dirtyFields.current.add(key);
     setForm((current) => ({ ...current, [key]: value }));
   }
 
@@ -728,11 +800,12 @@ export function SettingsPage() {
     settings.data?.connections.find((item) => item.key === key);
   const gmailClient = connection("GOOGLE_CLIENT_ID");
   const gmailSecret = connection("GOOGLE_CLIENT_SECRET");
+  const savedForm = settings.data ? fromResponse(settings.data) : defaults;
   const complianceReady = Boolean(
-    form.senderName.trim() &&
-      form.postalAddress.trim() &&
-      form.optOutText.trim() &&
-      form.complianceConfirmed,
+    savedForm.senderName.trim() &&
+      savedForm.postalAddress.trim() &&
+      savedForm.optOutText.trim() &&
+      savedForm.complianceConfirmed,
   );
   const configuredProviders = useMemo(
     () =>
@@ -1632,7 +1705,7 @@ export function SettingsPage() {
                     <p>
                       {formatDataDate(lastBackup.createdAt)} ·{" "}
                       {formatBytes(lastBackup.bytes)}
-                      {lastBackup.snapshotCount === undefined
+                      {lastBackup.snapshotCount == null
                         ? ""
                         : ` · ${lastBackup.snapshotCount.toLocaleString()} snapshots`}
                     </p>
@@ -1723,8 +1796,12 @@ export function SettingsPage() {
               <div className="local-data-danger__actions">
                 <TypedConfirmationDialog
                   action={async () => {
-                    await api.clearDemoData("CLEAR DEMO DATA");
-                    setDataMessage("Fictional demo companies were removed.");
+                    const result = await api.clearDemoData("CLEAR DEMO DATA");
+                    setDataMessage(
+                      result.recoveryBackup
+                        ? `Removed ${result.removedCompanies} fictional companies. Recovery backup: ${result.recoveryBackup}.`
+                        : "No fictional demo companies were found.",
+                    );
                     await invalidateWorkspaceData();
                   }}
                   confirmLabel="Clear demo data"
@@ -1738,10 +1815,11 @@ export function SettingsPage() {
                 />
                 <TypedConfirmationDialog
                   action={async () => {
-                    await api.deleteAllData("DELETE LOCAL DATA");
+                    const result = await api.deleteAllData("DELETE LOCAL DATA");
                     setDataMessage(
-                      "Working data was deleted after a recovery backup was created.",
+                      `Working data was deleted. Recovery backup: ${result.recoveryBackup}.`,
                     );
+                    dirtyFields.current.clear();
                     await invalidateWorkspaceData();
                   }}
                   confirmLabel="Delete local data"

@@ -15,6 +15,15 @@ interface ListResponse<T> extends ApiResult<T[]> {
   };
 }
 
+interface CsvImportResult {
+  runId: string;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  contacts: number;
+  parseWarnings: string[];
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -107,10 +116,10 @@ export const api = {
     sourceLabel: string,
     mapping?: Record<string, string>,
   ) =>
-    request("/api/discovery/import", {
+    request<ApiResult<CsvImportResult>>("/api/discovery/import", {
       method: "POST",
       body: JSON.stringify({ csv, sourceLabel, mapping }),
-    }),
+    }).then((response) => response.data),
   loadDemo: () =>
     request("/api/discovery/demo", { method: "POST", body: "{}" }),
   researchWebsite: (companyId: string) =>
@@ -151,6 +160,10 @@ export const api = {
     }),
   drafts: (params = new URLSearchParams()) =>
     request<ListResponse<OutreachDraft>>(`/api/outreach/drafts?${params}`),
+  draft: (id: string) =>
+    request<ApiResult<OutreachDraft>>(`/api/outreach/drafts/${id}`).then(
+      (response) => response.data,
+    ),
   generateDraft: (
     companyId: string,
     contactId: string,
@@ -170,10 +183,10 @@ export const api = {
     }).then((response) => response.data),
   settings: () => request<ApiResult<SettingsResponse>>("/api/settings").then((r) => r.data),
   patchSettings: (body: Record<string, unknown>) =>
-    request("/api/settings", {
+    request<ApiResult<Record<string, unknown>>>("/api/settings", {
       method: "PATCH",
       body: JSON.stringify(body),
-    }),
+    }).then((response) => response.data),
   patchSecrets: (body: Record<string, string | null>) =>
     request("/api/settings/secrets", {
       method: "PATCH",
@@ -223,6 +236,18 @@ export const api = {
       method: "POST",
       body: "{}",
     }).then((response) => response.data),
+  resolveUnknownSend: (
+    draftId: string,
+    resolution: "sent" | "not_sent",
+    note: string,
+  ) =>
+    request<ApiResult<OutreachDraft>>(
+      `/api/outreach/drafts/${draftId}/resolve-send`,
+      {
+        method: "POST",
+        body: JSON.stringify({ resolution, note }),
+      },
+    ).then((response) => response.data),
   recordDraftOutcome: (
     draftId: string,
     outcome: "replied" | "bounced" | "no_response",
@@ -265,15 +290,20 @@ export const api = {
   compactData: () =>
     request("/api/data/compact", { method: "POST", body: "{}" }),
   clearDemoData: (confirmation: string) =>
-    request("/api/data/clear-demo", {
+    request<
+      ApiResult<{ removedCompanies: number; recoveryBackup: string | null }>
+    >("/api/data/clear-demo", {
       method: "POST",
       body: JSON.stringify({ confirmation }),
-    }),
+    }).then((response) => response.data),
   deleteAllData: (confirmation: string) =>
-    request("/api/data/delete-all", {
+    request<ApiResult<{ deletedAt: string; recoveryBackup: string }>>(
+      "/api/data/delete-all",
+      {
       method: "POST",
       body: JSON.stringify({ confirmation }),
-    }),
+      },
+    ).then((response) => response.data),
   openDataFolder: () =>
     request("/api/data/open-folder", { method: "POST", body: "{}" }),
 };
@@ -330,7 +360,7 @@ export interface BackupItem {
   fileName: string;
   createdAt: string;
   bytes: number;
-  snapshotCount?: number;
+  snapshotCount?: number | null;
   downloadUrl: string;
 }
 
