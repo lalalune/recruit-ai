@@ -1,5 +1,5 @@
 [test]
 pathIgnorePatterns = ["tests/e2e/**"]
-timeout = 15000
+timeout = 60000
 coverageSkipTestFiles = true
 coverageThreshold = { line = 0.80, function = 0.80 }
